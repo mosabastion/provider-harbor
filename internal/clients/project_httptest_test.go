@@ -125,9 +125,9 @@ func TestProjectClient_RealCRUD(t *testing.T) {
 	c := newTestClient(t, srv.URL)
 	ctx := context.Background()
 
-	// Not found before creation.
-	if _, err := c.GetProject(ctx, "proof-proj"); !IsProjectNotFound(err) {
-		t.Fatalf("expected not-found before create, got %v", err)
+	// Not found before creation -> (nil, nil).
+	if st, err := c.GetProject(ctx, "proof-proj"); err != nil || st != nil {
+		t.Fatalf("expected (nil,nil) before create, got st=%v err=%v", st, err)
 	}
 
 	// Create -> returns the authoritative ID + visibility parsed from Harbor.
@@ -166,7 +166,7 @@ func TestProjectClient_RealCRUD(t *testing.T) {
 	if err := c.DeleteProject(ctx, "proof-proj"); err != nil {
 		t.Fatalf("DeleteProject: %v", err)
 	}
-	if _, err := c.GetProject(ctx, "proof-proj"); !IsProjectNotFound(err) {
-		t.Fatalf("expected not-found after delete, got %v", err)
+	if st, err := c.GetProject(ctx, "proof-proj"); err != nil || st != nil {
+		t.Fatalf("expected (nil,nil) after delete, got st=%v err=%v", st, err)
 	}
 }

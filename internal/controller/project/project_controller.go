@@ -105,12 +105,13 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	projectName := cr.Spec.ForProvider.Name
 	project, err := c.service.GetProject(ctx, projectName)
 	if err != nil {
-		// Only a genuine not-found means "create it"; any other error
-		// (auth/network/5xx) must surface so we don't spuriously recreate.
-		if harborclients.IsProjectNotFound(err) {
-			return managed.ExternalObservation{ResourceExists: false}, nil
-		}
+		// A real failure (auth/network/5xx) must surface, not be treated as
+		// "absent" (which would spuriously recreate the project).
 		return managed.ExternalObservation{}, errors.Wrap(err, errProjectGet)
+	}
+	if project == nil {
+		// Not found -> let Crossplane create it.
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	// Update status with observed state

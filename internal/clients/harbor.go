@@ -33,6 +33,7 @@ import (
 	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
@@ -337,44 +338,21 @@ func (c *HarborClient) TestConnection(ctx context.Context) error {
 }
 
 // CreateProject creates a new Harbor project
-// ErrProjectNotFound is returned by GetProject when Harbor reports no such project.
-var ErrProjectNotFound = errors.New("harbor: project not found")
-
-// IsProjectNotFound reports whether err indicates the Harbor project is absent.
-func IsProjectNotFound(err error) bool { return errors.Is(err, ErrProjectNotFound) }
-
-// harborIsNotFound reports whether a goharbor client error is an HTTP 404.
-// goharbor's GetProject swagger declares no 404 response, so a missing project
-// comes back as a *runtime.APIError with Code 404 (the reader's default branch)
-// rather than a typed not-found — match on the status code, not the message.
-func harborIsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *runtime.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.Code == http.StatusNotFound
-	}
-	return false
-}
-
-func strPtr(s string) *string { return &s }
-
 // projectMetadata maps the spec's boolean/string settings onto Harbor's
 // string-typed ProjectMetadata (Harbor stores these as "true"/"false").
 func projectMetadata(spec *ProjectSpec) *harbormodels.ProjectMetadata {
 	md := &harbormodels.ProjectMetadata{Public: strconv.FormatBool(spec.Public)}
 	if spec.AutoScanImages != nil {
-		md.AutoScan = strPtr(strconv.FormatBool(*spec.AutoScanImages))
+		md.AutoScan = ptr.To(strconv.FormatBool(*spec.AutoScanImages))
 	}
 	if spec.EnableContentTrust != nil {
-		md.EnableContentTrust = strPtr(strconv.FormatBool(*spec.EnableContentTrust))
+		md.EnableContentTrust = ptr.To(strconv.FormatBool(*spec.EnableContentTrust))
 	}
 	if spec.EnableContentTrustCosign != nil {
-		md.EnableContentTrustCosign = strPtr(strconv.FormatBool(*spec.EnableContentTrustCosign))
+		md.EnableContentTrustCosign = ptr.To(strconv.FormatBool(*spec.EnableContentTrustCosign))
 	}
 	if spec.PreventVulnerableImages != nil {
-		md.PreventVul = strPtr(strconv.FormatBool(*spec.PreventVulnerableImages))
+		md.PreventVul = ptr.To(strconv.FormatBool(*spec.PreventVulnerableImages))
 	}
 	if spec.Severity != nil {
 		md.Severity = spec.Severity
@@ -444,7 +422,14 @@ func (c *HarborClient) CreateProject(ctx context.Context, spec *ProjectSpec) (*P
 	}
 
 	// Re-read to capture the authoritative project ID and observed state.
-	return c.GetProject(ctx, spec.Name)
+	st, err := c.GetProject(ctx, spec.Name)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor project created but not yet observable")
+	}
+	return st, nil
 }
 
 // GetProject retrieves a Harbor project by name or ID
@@ -462,8 +447,12 @@ func (c *HarborClient) GetProject(ctx context.Context, projectName string) (*Pro
 	params.ProjectNameOrID = projectName
 	resp, err := v2Client.Project.GetProject(ctx, params)
 	if err != nil {
-		if harborIsNotFound(err) {
-			return nil, ErrProjectNotFound
+		// A missing project is reported as (nil, nil), not an error: Harbor's
+		// GetProject has no typed 404 in its swagger, so a 404 surfaces as a
+		// generic *runtime.APIError. Anything else is a real failure.
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil, nil
 		}
 		return nil, errors.Wrap(err, "cannot get Harbor project")
 	}
@@ -520,7 +509,9 @@ func (c *HarborClient) DeleteProject(ctx context.Context, projectName string) er
 	params := harborproject.NewDeleteProjectParams().WithContext(ctx)
 	params.ProjectNameOrID = projectName
 	if _, err := v2Client.Project.DeleteProject(ctx, params); err != nil {
-		if harborIsNotFound(err) {
+		// Already gone is success (idempotent delete).
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
 			return nil
 		}
 		return errors.Wrap(err, "cannot delete Harbor project")

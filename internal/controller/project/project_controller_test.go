@@ -85,7 +85,7 @@ func TestObserveProjectNotFound(t *testing.T) {
 	ext := &external{
 		service: &mockProjectClient{
 			getProjectFunc: func(ctx context.Context, projectName string) (*harborclients.ProjectStatus, error) {
-				return nil, harborclients.ErrProjectNotFound
+				return nil, nil // not found -> (nil, nil)
 			},
 		},
 	}
