@@ -27,7 +27,7 @@ import (
 	// replicationcontroller "github.com/rossigee/provider-harbor/internal/controller/replication"
 	repositorycontroller "github.com/rossigee/provider-harbor/internal/controller/repository"
 	// retentioncontroller "github.com/rossigee/provider-harbor/internal/controller/retention"
-	// robotcontroller "github.com/rossigee/provider-harbor/internal/controller/robot"
+	robotcontroller "github.com/rossigee/provider-harbor/internal/controller/robot"
 	scancontroller "github.com/rossigee/provider-harbor/internal/controller/scan"
 	scannercontroller "github.com/rossigee/provider-harbor/internal/controller/scanner"
 	usercontroller "github.com/rossigee/provider-harbor/internal/controller/user"
@@ -128,8 +128,10 @@ func main() {
 	kingpin.FatalIfError(scancontroller.Setup(mgr, o), "Cannot setup Scan controller")
 
 	// Setup Robot controller (Phase 3)
-	// DISABLED: CRD v1beta1 not available in cluster (only v1alpha1 exists)
-	// kingpin.FatalIfError(robotcontroller.Setup(mgr, o), "Cannot setup Robot controller")
+	// The v1beta1 Robot CRD now ships in package/crds and registers in-cluster
+	// (since the packaging fix), so the prior "v1beta1 not available" disable no
+	// longer holds.
+	kingpin.FatalIfError(robotcontroller.Setup(mgr, o), "Cannot setup Robot controller")
 
 	// Setup Webhook controller (Phase 3)
 	// DISABLED: CRD v1beta1 not available in cluster (only v1alpha1 exists)
