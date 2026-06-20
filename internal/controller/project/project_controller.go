@@ -128,15 +128,21 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	cr.Status.AtProvider.ChartCount = getInt64Ptr(project.ChartCount)
 	cr.Status.AtProvider.CurrentStorageUsage = getInt64Ptr(project.CurrentStorageUsage)
 
-	// The external resource exists, so the managed resource is available.
-	// crossplane-runtime v2's reconciler no longer sets Available() on the
-	// up-to-date path (it only marks ReconcileSuccess) — readiness is the
-	// provider's responsibility, so we must set it here or Ready stays stuck
-	// on whatever Create() set (Creating) forever.
-	cr.SetConditions(xpv1.Available())
-
 	// Check if resource is up to date
 	upToDate := cr.Spec.ForProvider.Public == nil || *cr.Spec.ForProvider.Public == project.Public
+
+	// Mark the managed resource Available once it exists AND matches desired
+	// state. crossplane-runtime v2's reconciler no longer sets Available() for
+	// us (it only marks ReconcileSuccess on the up-to-date path), so readiness
+	// is the provider's responsibility — without this, Ready stays stuck on
+	// whatever Create() set (Creating) forever. We gate on upToDate (not mere
+	// existence) to mirror the reconciler's historical behaviour: a project
+	// that exists but has drifted keeps its prior Ready while the reconciler
+	// issues an Update, rather than being reported Available before it matches
+	// spec. Drift is signalled via ResourceUpToDate, not a Ready downgrade.
+	if upToDate {
+		cr.SetConditions(xpv1.Available())
+	}
 
 	return managed.ExternalObservation{
 		ResourceExists:   true,
