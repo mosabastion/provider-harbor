@@ -56,7 +56,10 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		WithOptions(o).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.Project{}).
-		Complete(ratelimiter.NewReconciler(name, r, nil))
+		// A non-nil rate limiter is required: ratelimiter.Reconciler.When()
+		// dereferences it on every reconcile (nil -> panic). NewGlobal returns a
+		// string-keyed limiter matching ratelimiter.NewReconciler's signature.
+		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
 }
 
 // A connector is expected to produce an ExternalClient when its Connect method
