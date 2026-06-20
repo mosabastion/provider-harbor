@@ -85,7 +85,7 @@ func TestObserveProjectNotFound(t *testing.T) {
 	ext := &external{
 		service: &mockProjectClient{
 			getProjectFunc: func(ctx context.Context, projectName string) (*harborclients.ProjectStatus, error) {
-				return nil, errors.New("not found")
+				return nil, harborclients.ErrProjectNotFound
 			},
 		},
 	}
@@ -96,6 +96,28 @@ func TestObserveProjectNotFound(t *testing.T) {
 	}
 	if obs.ResourceExists {
 		t.Error("ResourceExists should be false when project not found")
+	}
+}
+
+// A non-not-found error from GetProject must propagate, not be treated as
+// "resource absent" (which would trigger a spurious Create).
+func TestObserveProjectGetError(t *testing.T) {
+	ctx := context.Background()
+	project := &v1beta1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-project"},
+		Spec:       v1beta1.ProjectSpec{ForProvider: v1beta1.ProjectParameters{Name: "my-project"}},
+	}
+
+	ext := &external{
+		service: &mockProjectClient{
+			getProjectFunc: func(ctx context.Context, projectName string) (*harborclients.ProjectStatus, error) {
+				return nil, errors.New("503 service unavailable")
+			},
+		},
+	}
+
+	if _, err := ext.Observe(ctx, project); err == nil {
+		t.Error("Observe must return the error for a non-not-found failure")
 	}
 }
 

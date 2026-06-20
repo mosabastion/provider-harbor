@@ -102,10 +102,12 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	projectName := cr.Spec.ForProvider.Name
 	project, err := c.service.GetProject(ctx, projectName)
 	if err != nil {
-		// If project doesn't exist, we need to create it
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil
+		// Only a genuine not-found means "create it"; any other error
+		// (auth/network/5xx) must surface so we don't spuriously recreate.
+		if harborclients.IsProjectNotFound(err) {
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+		return managed.ExternalObservation{}, errors.Wrap(err, errProjectGet)
 	}
 
 	// Update status with observed state
@@ -173,7 +175,7 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	return managed.ExternalCreation{
 		ConnectionDetails: managed.ConnectionDetails{
 			"project_name": []byte(status.Name),
-			"project_id":   []byte("1"), // Mock ID
+			"project_id":   []byte(status.ID),
 		},
 	}, nil
 }
@@ -205,15 +207,16 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.Wrap(err, errProjectUpdate)
 	}
 
-	// Update status
-	if status.CreatedAt != (time.Time{}) {
-		cr.Status.AtProvider.UpdateTime = &metav1.Time{Time: time.Now()}
+	// Update status with the observed update time + real project ID.
+	if status.UpdatedAt != (time.Time{}) {
+		cr.Status.AtProvider.UpdateTime = &metav1.Time{Time: status.UpdatedAt}
 	}
+	cr.Status.AtProvider.ID = getStringPtr(status.ID)
 
 	return managed.ExternalUpdate{
 		ConnectionDetails: managed.ConnectionDetails{
 			"project_name": []byte(status.Name),
-			"project_id":   []byte("1"), // Mock ID
+			"project_id":   []byte(status.ID),
 		},
 	}, nil
 }

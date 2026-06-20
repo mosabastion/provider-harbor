@@ -27,6 +27,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	"github.com/go-openapi/runtime"
 	"github.com/goharbor/go-client/pkg/harbor"
 	harborproject "github.com/goharbor/go-client/pkg/sdk/v2.0/client/project"
 	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
@@ -336,21 +337,25 @@ func (c *HarborClient) TestConnection(ctx context.Context) error {
 }
 
 // CreateProject creates a new Harbor project
-// errProjectNotFound is returned by GetProject when Harbor reports no such project.
-var errProjectNotFound = errors.New("harbor: project not found")
+// ErrProjectNotFound is returned by GetProject when Harbor reports no such project.
+var ErrProjectNotFound = errors.New("harbor: project not found")
 
 // IsProjectNotFound reports whether err indicates the Harbor project is absent.
-func IsProjectNotFound(err error) bool { return errors.Is(err, errProjectNotFound) }
+func IsProjectNotFound(err error) bool { return errors.Is(err, ErrProjectNotFound) }
 
+// harborIsNotFound reports whether a goharbor client error is an HTTP 404.
+// goharbor's GetProject swagger declares no 404 response, so a missing project
+// comes back as a *runtime.APIError with Code 404 (the reader's default branch)
+// rather than a typed not-found — match on the status code, not the message.
 func harborIsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	// goharbor's GetProject has no 404 response in its swagger spec, so a missing
-	// project surfaces as a generic "(status 404)" error; match the status code
-	// as well as the typed not-found phrasings.
-	return strings.Contains(s, "404") || strings.Contains(s, "notfound") || strings.Contains(s, "not found")
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == http.StatusNotFound
+	}
+	return false
 }
 
 func strPtr(s string) *string { return &s }
@@ -458,7 +463,7 @@ func (c *HarborClient) GetProject(ctx context.Context, projectName string) (*Pro
 	resp, err := v2Client.Project.GetProject(ctx, params)
 	if err != nil {
 		if harborIsNotFound(err) {
-			return nil, errProjectNotFound
+			return nil, ErrProjectNotFound
 		}
 		return nil, errors.Wrap(err, "cannot get Harbor project")
 	}
