@@ -130,7 +130,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		ResourceUpToDate: upToDate,
 		ConnectionDetails: managed.ConnectionDetails{
 			"project_name": []byte(project.Name),
-			"project_id":   []byte("1"), // Mock ID
+			"project_id":   []byte(project.ID),
 		},
 	}, nil
 }
@@ -164,8 +164,8 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.Wrap(err, errProjectCreate)
 	}
 
-	// Update status with created resource info
-	cr.Status.AtProvider.ID = getStringPtr("1") // Mock ID
+	// Update status with created resource info (real Harbor project ID)
+	cr.Status.AtProvider.ID = getStringPtr(status.ID)
 	if status.CreatedAt != (time.Time{}) {
 		cr.Status.AtProvider.CreationTime = &metav1.Time{Time: status.CreatedAt}
 	}
