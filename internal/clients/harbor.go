@@ -29,7 +29,9 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/go-openapi/runtime"
 	"github.com/goharbor/go-client/pkg/harbor"
+	harbormember "github.com/goharbor/go-client/pkg/sdk/v2.0/client/member"
 	harborproject "github.com/goharbor/go-client/pkg/sdk/v2.0/client/project"
+	harborrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
 	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -53,6 +55,25 @@ const (
 	// errExtractCredentials is returned when the credentials cannot be extracted from the provider config.
 	errExtractCredentials = "cannot extract credentials"
 )
+
+// isHarborNotFound reports whether err represents a Harbor 404. Harbor's swagger
+// is inconsistent: some operations carry a typed NotFound response (which
+// implements IsCode), while others surface a generic *runtime.APIError. This
+// detects both so callers can map "absent" to the (nil, nil) not-found contract.
+func isHarborNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+		return true
+	}
+	var coder interface{ IsCode(int) bool }
+	if errors.As(err, &coder) {
+		return coder.IsCode(http.StatusNotFound)
+	}
+	return false
+}
 
 // HarborClient provides Harbor API operations using the native Go client
 type HarborClient struct {
@@ -1256,7 +1277,93 @@ type MemberStatus struct {
 	CreationTime time.Time
 }
 
-// AddProjectMember adds a member to a Harbor project
+// memberRoleIDByName maps Harbor's project role names to their numeric IDs.
+// Harbor: 1 projectAdmin, 2 developer, 3 guest, 4 maintainer.
+var memberRoleIDByName = map[string]int64{
+	"projectAdmin": 1,
+	"developer":    2,
+	"guest":        3,
+	"maintainer":   4,
+}
+
+var memberRoleNameByID = map[int64]string{
+	1: "projectAdmin",
+	2: "developer",
+	3: "guest",
+	4: "maintainer",
+}
+
+func memberRoleID(role string) (int64, error) {
+	if id, ok := memberRoleIDByName[role]; ok {
+		return id, nil
+	}
+	// Also accept the numeric id directly.
+	if id, err := strconv.ParseInt(role, 10, 64); err == nil {
+		return id, nil
+	}
+	return 0, errors.Errorf("unknown Harbor project role %q (want projectAdmin|developer|guest|maintainer)", role)
+}
+
+// projectRef returns the project_name_or_id path value plus the X-Is-Resource-Name
+// header pointer: Harbor needs the header set when a project is addressed by name
+// rather than numeric ID. A nil header means "addressed by numeric ID".
+func projectRef(projectID string) (string, *bool) {
+	if _, err := strconv.ParseInt(projectID, 10, 64); err == nil {
+		return projectID, nil
+	}
+	return projectID, ptr.To(true)
+}
+
+func memberStatusFromEntity(m *harbormodels.ProjectMemberEntity) *MemberStatus {
+	st := &MemberStatus{
+		ID:         strconv.FormatInt(m.ID, 10),
+		MemberName: m.EntityName,
+		Role:       memberRoleNameByID[m.RoleID],
+	}
+	switch m.EntityType {
+	case "u":
+		st.MemberType = "user"
+	case "g":
+		st.MemberType = "group"
+	default:
+		st.MemberType = m.EntityType
+	}
+	if st.Role == "" {
+		st.Role = strconv.FormatInt(m.RoleID, 10)
+	}
+	return st
+}
+
+// findProjectMember returns the Harbor member entity for username, or nil if the
+// project has no such member. Harbor exposes no get-member-by-name, so we list
+// and match — the numeric member id this yields is required by update/delete.
+func (c *HarborClient) findProjectMember(ctx context.Context, projectID, username string) (*harbormodels.ProjectMemberEntity, error) {
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewListProjectMembersParams().WithContext(ctx).WithProjectNameOrID(ref)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	resp, err := v2Client.Member.ListProjectMembers(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor project members")
+	}
+	for _, m := range resp.Payload {
+		if m != nil && m.EntityName == username {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+// AddProjectMember adds a user member to a Harbor project with the given role.
 func (c *HarborClient) AddProjectMember(ctx context.Context, projectID, username, role string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1264,8 +1371,9 @@ func (c *HarborClient) AddProjectMember(ctx context.Context, projectID, username
 	if username == "" {
 		return errors.New("username is required")
 	}
-	if role == "" {
-		return errors.New("role is required")
+	roleID, err := memberRoleID(role)
+	if err != nil {
+		return err
 	}
 
 	v2Client := c.clientSet.V2()
@@ -1275,6 +1383,19 @@ func (c *HarborClient) AddProjectMember(ctx context.Context, projectID, username
 
 	c.logger.Info("Adding Harbor project member", "projectId", projectID, "username", username, "role", role)
 
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewCreateProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithProjectMember(&harbormodels.ProjectMember{
+			RoleID:     roleID,
+			MemberUser: &harbormodels.UserEntity{Username: username},
+		})
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.CreateProjectMember(ctx, params); err != nil {
+		return errors.Wrap(err, "cannot add Harbor project member")
+	}
 	return nil
 }
 
@@ -1291,20 +1412,27 @@ func (c *HarborClient) ListProjectMembers(ctx context.Context, projectID string)
 
 	c.logger.Info("Listing Harbor project members", "projectId", projectID)
 
-	members := []*MemberStatus{
-		{
-			ID:           "1",
-			MemberName:   "admin",
-			MemberType:   "user",
-			Role:         "master",
-			CreationTime: time.Now().Add(-30 * 24 * time.Hour),
-		},
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewListProjectMembersParams().WithContext(ctx).WithProjectNameOrID(ref)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	resp, err := v2Client.Member.ListProjectMembers(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor project members")
 	}
 
+	members := make([]*MemberStatus, 0, len(resp.Payload))
+	for _, m := range resp.Payload {
+		if m != nil {
+			members = append(members, memberStatusFromEntity(m))
+		}
+	}
 	return members, nil
 }
 
-// GetProjectMember retrieves a specific project member
+// GetProjectMember retrieves a specific project member by username, returning
+// (nil, nil) when the project has no such member.
 func (c *HarborClient) GetProjectMember(ctx context.Context, projectID, username string) (*MemberStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1313,25 +1441,17 @@ func (c *HarborClient) GetProjectMember(ctx context.Context, projectID, username
 		return nil, errors.New("username is required")
 	}
 
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
+	m, err := c.findProjectMember(ctx, projectID, username)
+	if err != nil {
+		return nil, err
 	}
-
-	c.logger.Info("Retrieving Harbor project member", "projectId", projectID, "username", username)
-
-	member := &MemberStatus{
-		ID:           "1",
-		MemberName:   username,
-		MemberType:   "user",
-		Role:         "developer",
-		CreationTime: time.Now().Add(-10 * 24 * time.Hour),
+	if m == nil {
+		return nil, nil
 	}
-
-	return member, nil
+	return memberStatusFromEntity(m), nil
 }
 
-// UpdateProjectMember updates a project member's role
+// UpdateProjectMember updates a project member's role.
 func (c *HarborClient) UpdateProjectMember(ctx context.Context, projectID, username, role string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1339,8 +1459,9 @@ func (c *HarborClient) UpdateProjectMember(ctx context.Context, projectID, usern
 	if username == "" {
 		return errors.New("username is required")
 	}
-	if role == "" {
-		return errors.New("role is required")
+	roleID, err := memberRoleID(role)
+	if err != nil {
+		return err
 	}
 
 	v2Client := c.clientSet.V2()
@@ -1348,12 +1469,31 @@ func (c *HarborClient) UpdateProjectMember(ctx context.Context, projectID, usern
 		return errors.New("failed to get Harbor v2 client")
 	}
 
+	m, err := c.findProjectMember(ctx, projectID, username)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return errors.Errorf("Harbor project member %q not found", username)
+	}
+
 	c.logger.Info("Updating Harbor project member", "projectId", projectID, "username", username, "role", role)
 
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewUpdateProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithMid(m.ID).
+		WithRole(&harbormodels.RoleRequest{RoleID: roleID})
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.UpdateProjectMember(ctx, params); err != nil {
+		return errors.Wrap(err, "cannot update Harbor project member")
+	}
 	return nil
 }
 
-// DeleteProjectMember removes a member from a project
+// DeleteProjectMember removes a member from a project (idempotent).
 func (c *HarborClient) DeleteProjectMember(ctx context.Context, projectID, username string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1367,8 +1507,29 @@ func (c *HarborClient) DeleteProjectMember(ctx context.Context, projectID, usern
 		return errors.New("failed to get Harbor v2 client")
 	}
 
+	m, err := c.findProjectMember(ctx, projectID, username)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return nil
+	}
+
 	c.logger.Info("Deleting Harbor project member", "projectId", projectID, "username", username)
 
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewDeleteProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithMid(m.ID)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.DeleteProjectMember(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor project member")
+	}
 	return nil
 }
 
@@ -1520,7 +1681,65 @@ type RobotStatus struct {
 	UpdateTime   time.Time
 }
 
-// CreateRobot creates a new robot account
+const robotLevelProject = "project"
+
+// robotPermissions maps the CR's permission shape onto Harbor's. Each CR
+// permission groups one resource namespace (its Namespace field, e.g.
+// "repository") with a set of actions (its Access field, e.g. "pull","push");
+// Harbor models these as per-action Access entries ({resource, action}) under a
+// single project-scoped RobotPermission whose Namespace is the project name.
+func robotPermissions(projectName string, perms []RobotPermission) []*harbormodels.RobotPermission {
+	if len(perms) == 0 {
+		return nil
+	}
+	access := make([]*harbormodels.Access, 0)
+	for _, p := range perms {
+		for _, a := range p.Access {
+			access = append(access, &harbormodels.Access{
+				Resource: p.Namespace,
+				Action:   a,
+			})
+		}
+	}
+	return []*harbormodels.RobotPermission{{
+		Kind:      robotLevelProject,
+		Namespace: projectName,
+		Access:    access,
+	}}
+}
+
+func robotStatusFromModel(r *harbormodels.Robot) *RobotStatus {
+	st := &RobotStatus{
+		ID:           strconv.FormatInt(r.ID, 10),
+		Name:         r.Name,
+		Secret:       r.Secret,
+		CreationTime: time.Time(r.CreationTime),
+		UpdateTime:   time.Time(r.UpdateTime),
+	}
+	if r.Description != "" {
+		st.Description = ptr.To(r.Description)
+	}
+	if r.ExpiresAt > 0 {
+		t := time.Unix(r.ExpiresAt, 0)
+		st.ExpiresAt = &t
+	}
+	// A project robot's permission namespace is its project name.
+	if len(r.Permissions) > 0 && r.Permissions[0] != nil && r.Permissions[0].Namespace != "" {
+		st.ProjectID = ptr.To(r.Permissions[0].Namespace)
+	}
+	return st
+}
+
+func robotDuration(expiresIn *int64) int64 {
+	if expiresIn != nil {
+		return *expiresIn
+	}
+	return -1 // Harbor: -1 means never expires.
+}
+
+// CreateRobot creates a new project-level robot account. The returned secret is
+// only ever available here (Harbor never returns it again), so the controller
+// must publish it as connection details on Create.
 func (c *HarborClient) CreateRobot(ctx context.Context, spec *RobotSpec) (*RobotStatus, error) {
 	if spec == nil {
 		return nil, errors.New("spec is required")
@@ -1536,17 +1755,36 @@ func (c *HarborClient) CreateRobot(ctx context.Context, spec *RobotSpec) (*Robot
 
 	c.logger.Info("Creating Harbor robot account", "name", spec.Name, "projectId", spec.ProjectID)
 
-	robot := &RobotStatus{
-		ID:           "1",
-		Name:         spec.Name,
-		Description:  spec.Description,
-		ProjectID:    spec.ProjectID,
-		Secret:       "robot-secret-token",
-		CreationTime: time.Now(),
-		UpdateTime:   time.Now(),
+	projectName := ptr.Deref(spec.ProjectID, "")
+	req := &harbormodels.RobotCreate{
+		Name:        spec.Name,
+		Description: ptr.Deref(spec.Description, ""),
+		Level:       robotLevelProject,
+		Duration:    robotDuration(spec.ExpiresIn),
+		Permissions: robotPermissions(projectName, spec.Permissions),
 	}
 
-	return robot, nil
+	params := harborrobot.NewCreateRobotParams().WithContext(ctx).WithRobot(req)
+	resp, err := v2Client.Robot.CreateRobot(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor robot")
+	}
+
+	created := resp.Payload
+	st := &RobotStatus{
+		ID:           strconv.FormatInt(created.ID, 10),
+		Name:         created.Name,
+		Secret:       created.Secret,
+		Description:  spec.Description,
+		ProjectID:    spec.ProjectID,
+		CreationTime: time.Time(created.CreationTime),
+		UpdateTime:   time.Time(created.CreationTime),
+	}
+	if created.ExpiresAt > 0 {
+		t := time.Unix(created.ExpiresAt, 0)
+		st.ExpiresAt = &t
+	}
+	return st, nil
 }
 
 // ListRobots lists all robot accounts
@@ -1558,16 +1796,25 @@ func (c *HarborClient) ListRobots(ctx context.Context, projectID *string) ([]*Ro
 
 	c.logger.Info("Listing Harbor robot accounts", "projectId", projectID)
 
-	robots := []*RobotStatus{
-		{
-			ID:           "1",
-			Name:         "ci-robot",
-			ProjectID:    projectID,
-			CreationTime: time.Now().Add(-24 * time.Hour),
-			UpdateTime:   time.Now(),
-		},
+	pageSize := int64(100)
+	params := harborrobot.NewListRobotParams().WithContext(ctx).WithPageSize(&pageSize)
+	resp, err := v2Client.Robot.ListRobot(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor robots")
 	}
 
+	robots := make([]*RobotStatus, 0, len(resp.Payload))
+	for _, r := range resp.Payload {
+		if r == nil {
+			continue
+		}
+		st := robotStatusFromModel(r)
+		// When scoped to a project, drop robots from other projects.
+		if projectID != nil && st.ProjectID != nil && *st.ProjectID != *projectID {
+			continue
+		}
+		robots = append(robots, st)
+	}
 	return robots, nil
 }
 
@@ -1582,16 +1829,24 @@ func (c *HarborClient) GetRobot(ctx context.Context, robotID string) (*RobotStat
 		return nil, errors.New("failed to get Harbor v2 client")
 	}
 
-	c.logger.Info("Retrieving Harbor robot account", "robotId", robotID)
-
-	robot := &RobotStatus{
-		ID:           robotID,
-		Name:         "ci-robot",
-		CreationTime: time.Now().Add(-24 * time.Hour),
-		UpdateTime:   time.Now(),
+	id, err := strconv.ParseInt(robotID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid robot ID")
 	}
 
-	return robot, nil
+	c.logger.Info("Retrieving Harbor robot account", "robotId", robotID)
+
+	params := harborrobot.NewGetRobotByIDParams().WithContext(ctx).WithRobotID(id)
+	resp, err := v2Client.Robot.GetRobotByID(ctx, params)
+	if err != nil {
+		// A missing robot is reported as (nil, nil), not an error.
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor robot")
+	}
+
+	return robotStatusFromModel(resp.Payload), nil
 }
 
 // UpdateRobot updates a robot account
@@ -1608,18 +1863,30 @@ func (c *HarborClient) UpdateRobot(ctx context.Context, robotID string, spec *Ro
 		return nil, errors.New("failed to get Harbor v2 client")
 	}
 
-	c.logger.Info("Updating Harbor robot account", "robotId", robotID, "name", spec.Name)
-
-	robot := &RobotStatus{
-		ID:           robotID,
-		Name:         spec.Name,
-		Description:  spec.Description,
-		ProjectID:    spec.ProjectID,
-		CreationTime: time.Now().Add(-24 * time.Hour),
-		UpdateTime:   time.Now(),
+	id, err := strconv.ParseInt(robotID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid robot ID")
 	}
 
-	return robot, nil
+	c.logger.Info("Updating Harbor robot account", "robotId", robotID, "name", spec.Name)
+
+	projectName := ptr.Deref(spec.ProjectID, "")
+	duration := robotDuration(spec.ExpiresIn)
+	req := &harbormodels.Robot{
+		ID:          id,
+		Name:        spec.Name,
+		Description: ptr.Deref(spec.Description, ""),
+		Level:       robotLevelProject,
+		Duration:    &duration,
+		Permissions: robotPermissions(projectName, spec.Permissions),
+	}
+
+	params := harborrobot.NewUpdateRobotParams().WithContext(ctx).WithRobotID(id).WithRobot(req)
+	if _, err := v2Client.Robot.UpdateRobot(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor robot")
+	}
+
+	return c.GetRobot(ctx, robotID)
 }
 
 // DeleteRobot deletes a robot account
@@ -1633,8 +1900,21 @@ func (c *HarborClient) DeleteRobot(ctx context.Context, robotID string) error {
 		return errors.New("failed to get Harbor v2 client")
 	}
 
+	id, err := strconv.ParseInt(robotID, 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "invalid robot ID")
+	}
+
 	c.logger.Info("Deleting Harbor robot account", "robotId", robotID)
 
+	params := harborrobot.NewDeleteRobotParams().WithContext(ctx).WithRobotID(id)
+	if _, err := v2Client.Robot.DeleteRobot(ctx, params); err != nil {
+		// Already gone is success (idempotent delete).
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor robot")
+	}
 	return nil
 }
 

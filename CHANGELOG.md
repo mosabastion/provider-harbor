@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+**Real CRUD for Robot and Member (replace stubs)**
+- Robot controller: client methods now call the real Harbor robot API (create/list/get/update/delete) via goharbor go-client instead of returning hardcoded values. The one-time robot secret returned at creation is published as connection details (`name`, `secret`) — Harbor never returns it again.
+- Member controller: client methods now call the real Harbor project-member API; roles map by name (`projectAdmin`/`developer`/`guest`/`maintainer`) to Harbor role IDs. `GetProjectMember` resolves the numeric member id via list (Harbor has no get-by-name), required by update/delete.
+- Both controllers now set `Available()` in `Observe` gated on up-to-date — crossplane-runtime v2's reconciler no longer does this, so `Ready` previously stayed stuck on `Creating` forever.
+- Both controllers now pass a non-nil rate limiter to `ratelimiter.NewReconciler` (a nil limiter panics on every reconcile).
+- Not-found is now the `(nil, nil)` contract (via a shared `isHarborNotFound` helper handling both typed 404 responses and generic `*runtime.APIError`); deletes are idempotent on 404. Member `Observe` no longer treats a real client error as "absent".
+
+**Tests**
+- httptest-backed proof tests for the real Robot and Member clients (stateful in-memory Harbor fake; no live Harbor, no credentials).
+- Controller tests assert `Available()` is set for up-to-date resources and withheld on drift, and that not-found vs real errors are distinguished.
+
 ## v0.16.0 (2025-06-09)
 
 ### Fixes

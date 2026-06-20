@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -396,6 +398,10 @@ func TestObserveRobotExists(t *testing.T) {
 	if !obs.ResourceUpToDate {
 		t.Error("ResourceUpToDate should be true")
 	}
+	// crossplane-runtime v2 no longer sets Available() for us; the controller must.
+	if robot.GetCondition(xpv1.TypeReady).Status != corev1.ConditionTrue {
+		t.Error("Ready condition should be True (Available) for an up-to-date robot")
+	}
 }
 
 func TestObserveRobotNotUpToDate(t *testing.T) {
@@ -443,6 +449,10 @@ func TestObserveRobotNotUpToDate(t *testing.T) {
 	}
 	if obs.ResourceUpToDate {
 		t.Error("ResourceUpToDate should be false when description differs")
+	}
+	// A drifted robot must NOT be reported Available — readiness is gated on up-to-date.
+	if robot.GetCondition(xpv1.TypeReady).Status == corev1.ConditionTrue {
+		t.Error("Ready condition should not be True for a drifted robot")
 	}
 }
 

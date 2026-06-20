@@ -6,6 +6,7 @@ package robot
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rossigee/provider-harbor/apis/robot/v1beta1"
@@ -48,7 +50,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		WithOptions(o).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.Robot{}).
-		Complete(ratelimiter.NewReconciler(name, r, nil))
+		// A non-nil rate limiter is required: ratelimiter.Reconciler.When()
+		// dereferences it on every reconcile (nil -> panic).
+		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
 }
 
 type connector struct {
@@ -87,33 +91,50 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 
 	for _, robot := range robots {
-		if robot.Name == cr.Spec.ForProvider.Name {
-			cr.Status.AtProvider.ID = &robot.ID
-			if robot.Secret != "" {
-				cr.Status.AtProvider.Secret = &robot.Secret
-			}
-			if robot.ExpiresAt != nil {
-				et := metav1.NewTime(*robot.ExpiresAt)
-				cr.Status.AtProvider.ExpiresAt = &et
-			}
-			t := metav1.NewTime(robot.CreationTime)
-			cr.Status.AtProvider.CreationTime = &t
-			ut := metav1.NewTime(robot.UpdateTime)
-			cr.Status.AtProvider.UpdateTime = &ut
-
-			upToDate := true
-			if cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description {
-				upToDate = false
-			}
-			if cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID {
-				upToDate = false
-			}
-
-			return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
+		// Harbor names a project robot robot$<project>+<shortname>, so match the
+		// CR's short name against either the exact name or that suffix.
+		if !matchesRobotName(robot.Name, cr.Spec.ForProvider.Name) {
+			continue
 		}
+
+		cr.Status.AtProvider.ID = &robot.ID
+		if robot.Secret != "" {
+			cr.Status.AtProvider.Secret = &robot.Secret
+		}
+		if robot.ExpiresAt != nil {
+			et := metav1.NewTime(*robot.ExpiresAt)
+			cr.Status.AtProvider.ExpiresAt = &et
+		}
+		t := metav1.NewTime(robot.CreationTime)
+		cr.Status.AtProvider.CreationTime = &t
+		ut := metav1.NewTime(robot.UpdateTime)
+		cr.Status.AtProvider.UpdateTime = &ut
+
+		upToDate := true
+		if cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description {
+			upToDate = false
+		}
+		if cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID {
+			upToDate = false
+		}
+
+		// crossplane-runtime v2 no longer sets Available() for us; readiness is
+		// the provider's responsibility. Gate on upToDate so a drifted robot keeps
+		// its prior Ready while the reconciler issues an Update.
+		if upToDate {
+			cr.SetConditions(xpv1.Available())
+		}
+
+		return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
 	}
 
 	return managed.ExternalObservation{ResourceExists: false}, nil
+}
+
+// matchesRobotName reports whether a Harbor robot's full name corresponds to the
+// CR's short name: either an exact match or the robot$<project>+<short> form.
+func matchesRobotName(full, short string) bool {
+	return full == short || strings.HasSuffix(full, "+"+short)
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
@@ -121,6 +142,8 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errNotRobot)
 	}
+
+	cr.SetConditions(xpv1.Creating())
 
 	spec := &harborclients.RobotSpec{
 		Name:        cr.Spec.ForProvider.Name,
@@ -130,12 +153,24 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		Permissions: convertPermissions(cr.Spec.ForProvider.Permissions),
 	}
 
-	_, err := c.service.CreateRobot(ctx, spec)
+	status, err := c.service.CreateRobot(ctx, spec)
 	if err != nil {
 		return managed.ExternalCreation{}, err
 	}
 
-	return managed.ExternalCreation{}, nil
+	// The robot secret is only returned at creation — record the observed id and
+	// publish the credential as connection details (Harbor never returns it again).
+	cr.Status.AtProvider.ID = &status.ID
+	if status.Secret != "" {
+		cr.Status.AtProvider.Secret = &status.Secret
+	}
+
+	return managed.ExternalCreation{
+		ConnectionDetails: managed.ConnectionDetails{
+			"name":   []byte(status.Name),
+			"secret": []byte(status.Secret),
+		},
+	}, nil
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
@@ -169,6 +204,8 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalDelete{}, errors.New(errNotRobot)
 	}
+
+	cr.SetConditions(xpv1.Deleting())
 
 	if cr.Status.AtProvider.ID == nil {
 		return managed.ExternalDelete{}, nil
