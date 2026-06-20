@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/rossigee/provider-harbor/apis/project/v1beta1"
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
@@ -159,6 +161,10 @@ func TestObserveProjectExists(t *testing.T) {
 	}
 	if !obs.ResourceUpToDate {
 		t.Error("ResourceUpToDate should be true")
+	}
+	// crossplane-runtime v2 no longer sets Available() for us; Observe must.
+	if c := project.GetCondition(xpv1.TypeReady); c.Status != corev1.ConditionTrue || c.Reason != xpv1.ReasonAvailable {
+		t.Errorf("expected Ready=True/Available after Observe of existing project, got %s/%s", c.Status, c.Reason)
 	}
 }
 

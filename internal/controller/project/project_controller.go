@@ -128,6 +128,13 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	cr.Status.AtProvider.ChartCount = getInt64Ptr(project.ChartCount)
 	cr.Status.AtProvider.CurrentStorageUsage = getInt64Ptr(project.CurrentStorageUsage)
 
+	// The external resource exists, so the managed resource is available.
+	// crossplane-runtime v2's reconciler no longer sets Available() on the
+	// up-to-date path (it only marks ReconcileSuccess) — readiness is the
+	// provider's responsibility, so we must set it here or Ready stays stuck
+	// on whatever Create() set (Creating) forever.
+	cr.SetConditions(xpv1.Available())
+
 	// Check if resource is up to date
 	upToDate := cr.Spec.ForProvider.Public == nil || *cr.Spec.ForProvider.Public == project.Public
 
