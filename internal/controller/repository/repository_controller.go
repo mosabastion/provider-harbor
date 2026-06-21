@@ -112,10 +112,9 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	upToDate := cr.Spec.ForProvider.Description == nil || status.Description == "" || *cr.Spec.ForProvider.Description == status.Description
 
-	// Mark the managed resource Available once it exists AND matches desired state.
-	if upToDate {
-		cr.SetConditions(xpv1.Available())
-	}
+	// Mark Available: the resource exists and is usable. Drift is signalled via
+	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.
+	cr.SetConditions(xpv1.Available())
 
 	return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
 }

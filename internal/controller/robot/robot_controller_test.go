@@ -450,9 +450,10 @@ func TestObserveRobotNotUpToDate(t *testing.T) {
 	if obs.ResourceUpToDate {
 		t.Error("ResourceUpToDate should be false when description differs")
 	}
-	// A drifted robot must NOT be reported Available — readiness is gated on up-to-date.
-	if robot.GetCondition(xpv1.TypeReady).Status == corev1.ConditionTrue {
-		t.Error("Ready condition should not be True for a drifted robot")
+	// A drifted-but-existing robot stays Available — drift is signalled only by
+	// ResourceUpToDate=false (which drives Update), not by withholding Ready.
+	if robot.GetCondition(xpv1.TypeReady).Status != corev1.ConditionTrue {
+		t.Error("Ready should be True (Available) for an existing robot, even when drifted")
 	}
 }
 

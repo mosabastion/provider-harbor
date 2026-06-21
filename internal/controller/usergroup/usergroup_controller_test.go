@@ -148,10 +148,11 @@ func TestObserveUserGroupNotUpToDate(t *testing.T) {
 	if obs.ResourceUpToDate {
 		t.Error("expected ResourceUpToDate=false when group type drifted")
 	}
-	// Available() must NOT be set when drifted.
+	// A drifted-but-existing group stays Available — drift is signalled only by
+	// ResourceUpToDate=false (which drives Update), not by withholding Ready.
 	cond := cr.GetCondition(xpv1.TypeReady)
-	if cond.Status == "True" {
-		t.Error("expected Ready!=True when group is drifted (not up to date)")
+	if cond.Status != "True" {
+		t.Error("expected Ready=True (Available) for an existing group, even when drifted")
 	}
 }
 

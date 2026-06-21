@@ -16,6 +16,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
@@ -98,40 +99,57 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotUserGroup)
 	}
 
-	// Check if the user group exists in Harbor
+	// Prefer the authoritative get-by-id once the group's Harbor id is known
+	// (stored as the external name). A list+name match cannot reliably re-match a
+	// just-created group, which causes a create→409 loop; the id path fixes that.
+	if id := userGroupExternalID(cr); id != "" {
+		gid, _ := strconv.ParseInt(id, 10, 64)
+		group, err := c.service.GetUserGroup(ctx, gid)
+		if err != nil {
+			return managed.ExternalObservation{}, errors.Wrap(err, errUserGroupGet)
+		}
+		if group == nil {
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+		return userGroupObservation(cr, group), nil
+	}
+
+	// No id yet: fall back to a name match to adopt a pre-existing group.
 	groupName := cr.Spec.ForProvider.GroupName
 	groups, err := c.service.ListUserGroups(ctx)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errUserGroupGet)
 	}
-
-	var group *harborclients.UserGroupStatus
 	for _, g := range groups {
 		if g.GroupName == groupName {
-			group = g
-			break
+			meta.SetExternalName(cr, strconv.FormatInt(g.ID, 10))
+			return userGroupObservation(cr, g), nil
 		}
 	}
 
-	if group == nil {
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil
-	}
+	return managed.ExternalObservation{ResourceExists: false}, nil
+}
 
-	// Update status with observed state
+// userGroupExternalID returns the Harbor group id stored as the external name,
+// or "" if not set yet (external name defaults to metadata.name, non-numeric).
+func userGroupExternalID(cr *v1beta1.UserGroup) string {
+	en := meta.GetExternalName(cr)
+	if en == "" || en == cr.GetName() {
+		return ""
+	}
+	if _, err := strconv.ParseInt(en, 10, 64); err != nil {
+		return ""
+	}
+	return en
+}
+
+func userGroupObservation(cr *v1beta1.UserGroup, group *harborclients.UserGroupStatus) managed.ExternalObservation {
 	cr.Status.AtProvider.ID = &group.ID
 
-	// Check if resource is up to date
 	upToDate := cr.Spec.ForProvider.GroupType == group.GroupType &&
 		cr.Spec.ForProvider.GroupName == group.GroupName
 
-	// Mark Available only when the external resource matches desired state.
-	// crossplane-runtime v2 does not set Available() for us; readiness is the
-	// provider's responsibility.
-	if upToDate {
-		cr.SetConditions(xpv1.Available())
-	}
+	cr.SetConditions(xpv1.Available())
 
 	return managed.ExternalObservation{
 		ResourceExists:   true,
@@ -140,7 +158,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			"group_name": []byte(group.GroupName),
 			"group_id":   []byte(strconv.FormatInt(group.ID, 10)),
 		},
-	}, nil
+	}
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
@@ -163,7 +181,8 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.Wrap(err, errUserGroupCreate)
 	}
 
-	// Update status with created resource info
+	// Persist the id as the external name so the next Observe can get-by-id.
+	meta.SetExternalName(cr, strconv.FormatInt(result.ID, 10))
 	cr.Status.AtProvider.ID = &result.ID
 
 	return managed.ExternalCreation{

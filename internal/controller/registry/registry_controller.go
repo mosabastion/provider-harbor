@@ -126,10 +126,9 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		cr.Spec.ForProvider.URL == registry.URL &&
 		cr.Spec.ForProvider.Type == registry.Type
 
-	// Mark the managed resource Available once it exists AND matches desired state.
-	if upToDate {
-		cr.SetConditions(xpv1.Available())
-	}
+	// Mark Available: the resource exists and is usable. Drift is signalled via
+	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.
+	cr.SetConditions(xpv1.Available())
 
 	registryID := strconv.FormatInt(registry.ID, 10)
 	return managed.ExternalObservation{

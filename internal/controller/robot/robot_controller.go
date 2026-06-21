@@ -6,6 +6,7 @@ package robot
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
@@ -84,51 +86,84 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotRobot)
 	}
 
-	// Get robot by name (simplified - Harbor API would need the robot ID)
+	// Prefer the authoritative get-by-id once the robot's Harbor id is known
+	// (stored as the external name). Harbor's system robot list (GET /robots)
+	// does NOT return project-scoped robots, so a name/list lookup cannot
+	// reliably re-match a project robot after creation — the id path is what
+	// keeps Observe stable and avoids a create→409 loop.
+	if id := robotExternalID(cr); id != "" {
+		robot, err := c.service.GetRobot(ctx, id)
+		if err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		if robot == nil {
+			// Deleted out of band — let Crossplane recreate it.
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+		return robotObservation(cr, robot), nil
+	}
+
+	// No id yet: fall back to a name match over the list to adopt a pre-existing
+	// robot. Harbor names a project robot robot$<project>+<shortname>.
 	robots, err := c.service.ListRobots(ctx, cr.Spec.ForProvider.ProjectID)
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
-
 	for _, robot := range robots {
-		// Harbor names a project robot robot$<project>+<shortname>, so match the
-		// CR's short name against either the exact name or that suffix.
 		if !matchesRobotName(robot.Name, cr.Spec.ForProvider.Name) {
 			continue
 		}
-
-		cr.Status.AtProvider.ID = &robot.ID
-		if robot.Secret != "" {
-			cr.Status.AtProvider.Secret = &robot.Secret
-		}
-		if robot.ExpiresAt != nil {
-			et := metav1.NewTime(*robot.ExpiresAt)
-			cr.Status.AtProvider.ExpiresAt = &et
-		}
-		t := metav1.NewTime(robot.CreationTime)
-		cr.Status.AtProvider.CreationTime = &t
-		ut := metav1.NewTime(robot.UpdateTime)
-		cr.Status.AtProvider.UpdateTime = &ut
-
-		upToDate := true
-		if cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description {
-			upToDate = false
-		}
-		if cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID {
-			upToDate = false
-		}
-
-		// crossplane-runtime v2 no longer sets Available() for us; readiness is
-		// the provider's responsibility. Gate on upToDate so a drifted robot keeps
-		// its prior Ready while the reconciler issues an Update.
-		if upToDate {
-			cr.SetConditions(xpv1.Available())
-		}
-
-		return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
+		meta.SetExternalName(cr, robot.ID)
+		return robotObservation(cr, robot), nil
 	}
 
 	return managed.ExternalObservation{ResourceExists: false}, nil
+}
+
+// robotExternalID returns the Harbor robot id stored as the external name, or ""
+// if it has not been set yet. Crossplane defaults the external name to
+// metadata.name, which is not a numeric Harbor id, so we treat a non-numeric
+// external name as "not created yet".
+func robotExternalID(cr *v1beta1.Robot) string {
+	en := meta.GetExternalName(cr)
+	if en == "" || en == cr.GetName() {
+		return ""
+	}
+	if _, err := strconv.ParseInt(en, 10, 64); err != nil {
+		return ""
+	}
+	return en
+}
+
+// robotObservation records observed state on the CR and computes the
+// ExternalObservation (drift + readiness).
+func robotObservation(cr *v1beta1.Robot, robot *harborclients.RobotStatus) managed.ExternalObservation {
+	cr.Status.AtProvider.ID = &robot.ID
+	if robot.Secret != "" {
+		cr.Status.AtProvider.Secret = &robot.Secret
+	}
+	if robot.ExpiresAt != nil {
+		et := metav1.NewTime(*robot.ExpiresAt)
+		cr.Status.AtProvider.ExpiresAt = &et
+	}
+	t := metav1.NewTime(robot.CreationTime)
+	cr.Status.AtProvider.CreationTime = &t
+	ut := metav1.NewTime(robot.UpdateTime)
+	cr.Status.AtProvider.UpdateTime = &ut
+
+	upToDate := true
+	if cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description {
+		upToDate = false
+	}
+	if cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID {
+		upToDate = false
+	}
+
+	// Mark Available: the resource exists and is usable. Drift is signalled via
+	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.
+	cr.SetConditions(xpv1.Available())
+
+	return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}
 }
 
 // matchesRobotName reports whether a Harbor robot's full name corresponds to the
@@ -160,6 +195,10 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	// The robot secret is only returned at creation — record the observed id and
 	// publish the credential as connection details (Harbor never returns it again).
+	// Persist the id as the external name: crossplane-runtime writes it back
+	// immediately after Create, so the next Observe can get-by-id (Harbor's robot
+	// list won't surface project robots).
+	meta.SetExternalName(cr, status.ID)
 	cr.Status.AtProvider.ID = &status.ID
 	if status.Secret != "" {
 		cr.Status.AtProvider.Secret = &status.Secret

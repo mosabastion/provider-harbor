@@ -117,9 +117,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			// Mark the managed resource Available once it exists AND matches
 			// desired state. crossplane-runtime v2 no longer sets Available()
 			// automatically — readiness is the provider's responsibility.
-			if upToDate {
-				cr.SetConditions(xpv1.Available())
-			}
+			cr.SetConditions(xpv1.Available())
 
 			return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
 		}

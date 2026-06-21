@@ -587,9 +587,11 @@ func TestObserveRetentionDoesNotSetAvailableWhenNotUpToDate(t *testing.T) {
 	if obs.ResourceUpToDate {
 		t.Fatal("ResourceUpToDate should be false when description differs")
 	}
+	// A drifted-but-existing resource stays Available — drift is signalled only by
+	// ResourceUpToDate=false (which drives Update), not by withholding Ready.
 	cond := cr.GetCondition("Ready")
-	if cond.Reason == "Available" {
-		t.Errorf("Ready should NOT be Available when not up-to-date, got %q", cond.Reason)
+	if cond.Reason != "Available" {
+		t.Errorf("Ready should be Available for an existing policy, got %q", cond.Reason)
 	}
 }
 

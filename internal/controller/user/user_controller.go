@@ -120,11 +120,9 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	upToDate := cr.Spec.ForProvider.Email == user.Email &&
 		(cr.Spec.ForProvider.SysAdminFlag == nil || *cr.Spec.ForProvider.SysAdminFlag == user.AdminFlag)
 
-	// Mark the managed resource Available once it exists AND matches desired state.
-	// crossplane-runtime v2 does not set Available() for us.
-	if upToDate {
-		cr.SetConditions(xpv1.Available())
-	}
+	// Mark Available: the resource exists and is usable. Drift is signalled via
+	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.
+	cr.SetConditions(xpv1.Available())
 
 	return managed.ExternalObservation{
 		ResourceExists:   true,
