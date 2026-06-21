@@ -52,7 +52,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		WithOptions(o).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.Repository{}).
-		Complete(ratelimiter.NewReconciler(name, r, nil))
+		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
 }
 
 // connector is responsible for producing ExternalClients.

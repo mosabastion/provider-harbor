@@ -57,7 +57,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		WithOptions(o).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.User{}).
-		Complete(ratelimiter.NewReconciler(name, r, nil))
+		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
 }
 
 // A connector is expected to produce an ExternalClient when its Connect method
