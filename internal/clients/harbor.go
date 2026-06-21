@@ -51,13 +51,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
-	projectv1beta1 "github.com/rossigee/provider-harbor/apis/project/v1beta1"
-	registryv1beta1 "github.com/rossigee/provider-harbor/apis/registry/v1beta1"
-	replicationv1beta1 "github.com/rossigee/provider-harbor/apis/replication/v1beta1"
-	retentionv1beta1 "github.com/rossigee/provider-harbor/apis/retention/v1beta1"
-	scannerv1beta1 "github.com/rossigee/provider-harbor/apis/scanner/v1beta1"
-	userv1beta1 "github.com/rossigee/provider-harbor/apis/user/v1beta1"
-	usergroupv1beta1 "github.com/rossigee/provider-harbor/apis/usergroup/v1beta1"
 	"github.com/rossigee/provider-harbor/apis/v1beta1"
 )
 
@@ -258,32 +251,17 @@ func NewHarborClient(config *HarborConfig) (*HarborClient, error) {
 // NewHarborClientFromProviderConfig creates a Harbor client from a ProviderConfig
 // This maintains compatibility with the existing Crossplane provider pattern
 func NewHarborClientFromProviderConfig(ctx context.Context, k8sClient client.Client, mg resource.Managed) (HarborClienter, error) {
-	// Get provider config reference from the managed resource
-	// In v2, we need to access it through the spec directly
-	var configRef *xpv1.ProviderConfigReference
-
-	// Try to cast to a concrete type that has ProviderConfigReference
-	if project, ok := mg.(*projectv1beta1.Project); ok {
-		configRef = project.Spec.ProviderConfigReference
-	} else if scanner, ok := mg.(*scannerv1beta1.ScannerRegistration); ok {
-		configRef = scanner.Spec.ProviderConfigReference
-	} else if user, ok := mg.(*userv1beta1.User); ok {
-		configRef = user.Spec.ProviderConfigReference
-	} else if registry, ok := mg.(*registryv1beta1.Registry); ok {
-		configRef = registry.Spec.ProviderConfigReference
-	} else if usergroup, ok := mg.(*usergroupv1beta1.UserGroup); ok {
-		configRef = usergroup.Spec.ProviderConfigReference
-	} else if repl, ok := mg.(*replicationv1beta1.Replication); ok {
-		configRef = repl.Spec.ProviderConfigReference
-	} else if ret, ok := mg.(*retentionv1beta1.Retention); ok {
-		configRef = ret.Spec.ProviderConfigReference
-	} else {
-		// Fallback: assume the managed resource has ProviderConfigReference
-		// This is a bit of a hack but works for most cases
-		// In a real implementation, you'd handle each type specifically
-		return nil, errors.New("unsupported managed resource type")
+	// Every Harbor managed resource is generated with a GetProviderConfigReference
+	// accessor (its spec embeds xpv1.ManagedResourceSpec). Resolve the reference
+	// generically via that interface rather than a per-type switch, so a new
+	// resource works without editing this function.
+	pcr, ok := mg.(interface {
+		GetProviderConfigReference() *xpv1.ProviderConfigReference
+	})
+	if !ok {
+		return nil, errors.New("managed resource does not expose a ProviderConfigReference")
 	}
-
+	configRef := pcr.GetProviderConfigReference()
 	if configRef == nil {
 		return nil, errors.New(errNoProviderConfig)
 	}
