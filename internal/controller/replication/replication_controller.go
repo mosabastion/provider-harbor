@@ -120,6 +120,18 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	cr.SetConditions(xpv1.Creating())
 
+	_, err := c.service.CreateReplicationPolicy(ctx, replicationSpecFromCR(cr))
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+
+	return managed.ExternalCreation{}, nil
+}
+
+// replicationSpecFromCR builds the full client spec from the CR. Used by both
+// Create and Update so an update carries the complete desired state (destination
+// registry, filters, source) rather than a partial patch.
+func replicationSpecFromCR(cr *v1beta1.Replication) *harborclients.ReplicationPolicySpec {
 	spec := &harborclients.ReplicationPolicySpec{
 		Name:            cr.Spec.ForProvider.Name,
 		Description:     cr.Spec.ForProvider.Description,
@@ -129,29 +141,18 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		Override:        cr.Spec.ForProvider.Override,
 		Enabled:         cr.Spec.ForProvider.Enabled,
 	}
-
 	if len(cr.Spec.ForProvider.Filters) > 0 {
 		spec.Filters = make([]harborclients.ReplicationPolicyFilter, len(cr.Spec.ForProvider.Filters))
 		for i, f := range cr.Spec.ForProvider.Filters {
-			spec.Filters[i] = harborclients.ReplicationPolicyFilter{
-				Type:  f.Type,
-				Value: f.Value,
-			}
+			spec.Filters[i] = harborclients.ReplicationPolicyFilter{Type: f.Type, Value: f.Value}
 		}
 	}
-
 	spec.DestinationReg = &harborclients.ReplicationPolicyDestination{
 		Name:      cr.Spec.ForProvider.DestinationReg.Name,
 		Namespace: cr.Spec.ForProvider.DestinationReg.Namespace,
 		URL:       cr.Spec.ForProvider.DestinationReg.URL,
 	}
-
-	_, err := c.service.CreateReplicationPolicy(ctx, spec)
-	if err != nil {
-		return managed.ExternalCreation{}, err
-	}
-
-	return managed.ExternalCreation{}, nil
+	return spec
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
@@ -164,16 +165,7 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.New("policy ID not set")
 	}
 
-	spec := &harborclients.ReplicationPolicySpec{
-		Name:            cr.Spec.ForProvider.Name,
-		Description:     cr.Spec.ForProvider.Description,
-		Trigger:         cr.Spec.ForProvider.Trigger,
-		DeleteSourceTag: cr.Spec.ForProvider.DeleteSourceTag,
-		Override:        cr.Spec.ForProvider.Override,
-		Enabled:         cr.Spec.ForProvider.Enabled,
-	}
-
-	_, err := c.service.UpdateReplicationPolicy(ctx, *cr.Status.AtProvider.ID, spec)
+	_, err := c.service.UpdateReplicationPolicy(ctx, *cr.Status.AtProvider.ID, replicationSpecFromCR(cr))
 	if err != nil {
 		return managed.ExternalUpdate{}, err
 	}
