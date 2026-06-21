@@ -114,20 +114,18 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return userGroupObservation(cr, group), nil
 	}
 
-	// No id yet: fall back to a name match to adopt a pre-existing group.
-	groupName := cr.Spec.ForProvider.GroupName
-	groups, err := c.service.ListUserGroups(ctx)
+	// No id yet: adopt a pre-existing group by name. Use the server-side
+	// group_name filter (not an unfiltered list) — in OIDC mode Harbor accrues
+	// many auto-created groups, so a paged unfiltered list may not contain ours.
+	group, err := c.service.GetUserGroupByName(ctx, cr.Spec.ForProvider.GroupName)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errUserGroupGet)
 	}
-	for _, g := range groups {
-		if g.GroupName == groupName {
-			meta.SetExternalName(cr, strconv.FormatInt(g.ID, 10))
-			return userGroupObservation(cr, g), nil
-		}
+	if group == nil {
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
-
-	return managed.ExternalObservation{ResourceExists: false}, nil
+	meta.SetExternalName(cr, strconv.FormatInt(group.ID, 10))
+	return userGroupObservation(cr, group), nil
 }
 
 // userGroupExternalID returns the Harbor group id stored as the external name,

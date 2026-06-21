@@ -3221,31 +3221,53 @@ func (c *HarborClient) CreateUserGroup(ctx context.Context, spec *UserGroupSpec)
 		return nil, errors.Wrap(err, "cannot create Harbor user group")
 	}
 
-	// Parse the numeric group ID from the Location header
-	// (e.g. /api/v2.0/usergroups/42).
-	loc := resp.Location
-	lastSlash := strings.LastIndex(loc, "/")
-	if lastSlash < 0 || lastSlash == len(loc)-1 {
-		return nil, errors.Errorf("unexpected Location header from Harbor: %q", loc)
-	}
-	idStr := loc[lastSlash+1:]
-	gid, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "cannot parse group ID from Location %q", loc)
+	// Resolve the new group's id. Prefer the Location header when present
+	// (/api/v2.0/usergroups/42); Harbor does not always populate it, so fall back
+	// to a name lookup. The name lookup is also the resilient path in OIDC mode,
+	// where many groups exist and an unfiltered/paged list may not contain ours.
+	if gid, lerr := idFromLocation(resp.Location); lerr == nil && gid > 0 {
+		st, err := c.GetUserGroup(ctx, gid)
+		if err != nil {
+			return nil, err
+		}
+		if st != nil && st.ID > 0 {
+			return st, nil
+		}
 	}
 
-	// Re-read to capture authoritative state.
-	st, err := c.GetUserGroup(ctx, gid)
+	st, err := c.GetUserGroupByName(ctx, spec.GroupName)
 	if err != nil {
 		return nil, err
 	}
 	if st == nil {
-		return nil, errors.New("Harbor user group created but not yet observable")
-	}
-	if st.ID <= 0 {
-		return nil, errors.Errorf("Harbor user group created but returned a non-positive id (%d)", st.ID)
+		return nil, errors.New("Harbor user group created but not found by name")
 	}
 	return st, nil
+}
+
+// GetUserGroupByName finds a Harbor user group by exact name using Harbor's
+// group_name filter (fuzzy server-side; we exact-match the result). Returns
+// (nil, nil) when no group with that name exists.
+func (c *HarborClient) GetUserGroupByName(ctx context.Context, name string) (*UserGroupStatus, error) {
+	if name == "" {
+		return nil, errors.New("group name is required")
+	}
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+
+	params := harborusergroup.NewListUserGroupsParams().WithContext(ctx).WithGroupName(&name)
+	resp, err := v2Client.Usergroup.ListUserGroups(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot search Harbor user groups")
+	}
+	for _, g := range resp.Payload {
+		if g != nil && g.GroupName == name {
+			return userGroupStatusFromModel(g), nil
+		}
+	}
+	return nil, nil
 }
 
 // ListUserGroups lists all user groups in Harbor.

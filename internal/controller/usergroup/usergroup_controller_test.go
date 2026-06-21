@@ -20,10 +20,18 @@ import (
 // interface only for the methods exercised by the usergroup controller.
 type mockUserGroupClient struct {
 	harborclients.MockHarborClient
-	listFunc   func(ctx context.Context) ([]*harborclients.UserGroupStatus, error)
-	createFunc func(ctx context.Context, spec *harborclients.UserGroupSpec) (*harborclients.UserGroupStatus, error)
-	updateFunc func(ctx context.Context, id int64, spec *harborclients.UserGroupSpec) (*harborclients.UserGroupStatus, error)
-	deleteFunc func(ctx context.Context, id int64) error
+	listFunc      func(ctx context.Context) ([]*harborclients.UserGroupStatus, error)
+	getByNameFunc func(ctx context.Context, name string) (*harborclients.UserGroupStatus, error)
+	createFunc    func(ctx context.Context, spec *harborclients.UserGroupSpec) (*harborclients.UserGroupStatus, error)
+	updateFunc    func(ctx context.Context, id int64, spec *harborclients.UserGroupSpec) (*harborclients.UserGroupStatus, error)
+	deleteFunc    func(ctx context.Context, id int64) error
+}
+
+func (m *mockUserGroupClient) GetUserGroupByName(ctx context.Context, name string) (*harborclients.UserGroupStatus, error) {
+	if m.getByNameFunc != nil {
+		return m.getByNameFunc(ctx, name)
+	}
+	return nil, nil
 }
 
 func (m *mockUserGroupClient) ListUserGroups(ctx context.Context) ([]*harborclients.UserGroupStatus, error) {
@@ -75,8 +83,8 @@ func TestObserveUserGroupNotFound(t *testing.T) {
 	ctx := context.Background()
 	ext := &external{
 		service: &mockUserGroupClient{
-			listFunc: func(ctx context.Context) ([]*harborclients.UserGroupStatus, error) {
-				return []*harborclients.UserGroupStatus{}, nil
+			getByNameFunc: func(ctx context.Context, name string) (*harborclients.UserGroupStatus, error) {
+				return nil, nil
 			},
 		},
 	}
@@ -95,10 +103,8 @@ func TestObserveUserGroupAvailableWhenUpToDate(t *testing.T) {
 	gid := int64(42)
 	ext := &external{
 		service: &mockUserGroupClient{
-			listFunc: func(ctx context.Context) ([]*harborclients.UserGroupStatus, error) {
-				return []*harborclients.UserGroupStatus{
-					{ID: gid, GroupName: "devs", GroupType: 3},
-				}, nil
+			getByNameFunc: func(ctx context.Context, name string) (*harborclients.UserGroupStatus, error) {
+				return &harborclients.UserGroupStatus{ID: gid, GroupName: "devs", GroupType: 3}, nil
 			},
 		},
 	}
@@ -130,10 +136,8 @@ func TestObserveUserGroupNotUpToDate(t *testing.T) {
 	ctx := context.Background()
 	ext := &external{
 		service: &mockUserGroupClient{
-			listFunc: func(ctx context.Context) ([]*harborclients.UserGroupStatus, error) {
-				return []*harborclients.UserGroupStatus{
-					{ID: 5, GroupName: "devs", GroupType: 1}, // LDAP, but spec wants OIDC
-				}, nil
+			getByNameFunc: func(ctx context.Context, name string) (*harborclients.UserGroupStatus, error) {
+				return &harborclients.UserGroupStatus{ID: 5, GroupName: "devs", GroupType: 1}, nil // LDAP, but spec wants OIDC
 			},
 		},
 	}
