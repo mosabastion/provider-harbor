@@ -4,6 +4,15 @@
 
 ### Fixes
 
+**Whole-provider: real CRUD + readiness for every managed resource (replace stubs)**
+Brought every remaining managed resource from stub/partial to fully functional, matching the Project/Robot/Member pattern. Before this, only `project` worked end-to-end; the other controllers were either stubs returning hardcoded data or had real Create/Update/Delete but a stubbed `Get`, plus two repo-wide defects.
+- **Real client CRUD** via goharbor go-client for: registry, repository, user, scanner, usergroup, artifact, scan, webhook, replication, retention (and `GetVersion` now calls the real system-info API). `Get`-style methods return `(nil, nil)` on 404 via the shared `isHarborNotFound` helper; creates re-read to capture the authoritative id; deletes are idempotent on 404.
+- **Readiness**: every controller now sets `Available()` in `Observe` gated on up-to-date (crossplane-runtime v2 no longer does this).
+- **Rate limiter**: every controller now passes a non-nil rate limiter to `ratelimiter.NewReconciler` (a nil limiter panics on every reconcile).
+- **Wired previously-disabled controllers**: webhook, replication, retention are now registered in `cmd/provider/main.go` (the "v1beta1 CRD not available" note was stale — the CRDs ship and register since the packaging fix). All 13 resource controllers are now active.
+- **Tests**: httptest-backed proof tests (stateful in-memory Harbor fake; no live Harbor) for each newly-implemented client, plus controller assertions that `Available()` is set when up-to-date and withheld on drift / not-found.
+- Known per-resource API-shape caveats are documented inline (id-vs-name lookups, lazy repository creation, single retention policy per project, replication `enabled=false` omitempty).
+
 **Real CRUD for Robot and Member (replace stubs)**
 - Robot controller: client methods now call the real Harbor robot API (create/list/get/update/delete) via goharbor go-client instead of returning hardcoded values. The one-time robot secret returned at creation is published as connection details (`name`, `secret`) — Harbor never returns it again.
 - Member controller: client methods now call the real Harbor project-member API; roles map by name (`projectAdmin`/`developer`/`guest`/`maintainer`) to Harbor role IDs. `GetProjectMember` resolves the numeric member id via list (Harbor has no get-by-name), required by update/delete.

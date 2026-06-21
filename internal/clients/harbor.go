@@ -40,6 +40,7 @@ import (
 	harborrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
 	harborscan "github.com/goharbor/go-client/pkg/sdk/v2.0/client/scan"
 	harborscanner "github.com/goharbor/go-client/pkg/sdk/v2.0/client/scanner"
+	harborsysteminfo "github.com/goharbor/go-client/pkg/sdk/v2.0/client/systeminfo"
 	harboruser "github.com/goharbor/go-client/pkg/sdk/v2.0/client/user"
 	harborusergroup "github.com/goharbor/go-client/pkg/sdk/v2.0/client/usergroup"
 	harborwebhook "github.com/goharbor/go-client/pkg/sdk/v2.0/client/webhook"
@@ -580,11 +581,19 @@ func (c *HarborClient) ListProjects(ctx context.Context) ([]*ProjectStatus, erro
 
 // GetVersion returns Harbor version information
 func (c *HarborClient) GetVersion(ctx context.Context) (string, error) {
-	// The actual Harbor API call would be implemented here
-	// systeminfo, err := v2Client.Systeminfo.GetSysteminfo(ctx, &systeminfo.GetSysteminfoParams{})
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return "", errors.New("failed to get Harbor v2 client")
+	}
 
 	c.logger.Info("Retrieving Harbor version information")
-	return "Harbor v2.x (Go client)", nil
+
+	params := harborsysteminfo.NewGetSystemInfoParams().WithContext(ctx)
+	resp, err := v2Client.Systeminfo.GetSystemInfo(ctx, params)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get Harbor system info")
+	}
+	return ptr.Deref(resp.Payload.HarborVersion, "unknown"), nil
 }
 
 // GetMemoryFootprint returns estimated memory usage for this client
