@@ -6,6 +6,7 @@ package usergroup
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
@@ -122,13 +123,22 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	cr.Status.AtProvider.ID = &group.ID
 
 	// Check if resource is up to date
-	upToDate := cr.Spec.ForProvider.GroupType == group.GroupType
+	upToDate := cr.Spec.ForProvider.GroupType == group.GroupType &&
+		cr.Spec.ForProvider.GroupName == group.GroupName
+
+	// Mark Available only when the external resource matches desired state.
+	// crossplane-runtime v2 does not set Available() for us; readiness is the
+	// provider's responsibility.
+	if upToDate {
+		cr.SetConditions(xpv1.Available())
+	}
 
 	return managed.ExternalObservation{
 		ResourceExists:   true,
 		ResourceUpToDate: upToDate,
 		ConnectionDetails: managed.ConnectionDetails{
 			"group_name": []byte(group.GroupName),
+			"group_id":   []byte(strconv.FormatInt(group.ID, 10)),
 		},
 	}, nil
 }
