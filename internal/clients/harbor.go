@@ -41,6 +41,8 @@ import (
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	projectv1beta1 "github.com/rossigee/provider-harbor/apis/project/v1beta1"
 	registryv1beta1 "github.com/rossigee/provider-harbor/apis/registry/v1beta1"
+	replicationv1beta1 "github.com/rossigee/provider-harbor/apis/replication/v1beta1"
+	retentionv1beta1 "github.com/rossigee/provider-harbor/apis/retention/v1beta1"
 	scannerv1beta1 "github.com/rossigee/provider-harbor/apis/scanner/v1beta1"
 	userv1beta1 "github.com/rossigee/provider-harbor/apis/user/v1beta1"
 	usergroupv1beta1 "github.com/rossigee/provider-harbor/apis/usergroup/v1beta1"
@@ -258,6 +260,10 @@ func NewHarborClientFromProviderConfig(ctx context.Context, k8sClient client.Cli
 		configRef = registry.Spec.ProviderConfigReference
 	} else if usergroup, ok := mg.(*usergroupv1beta1.UserGroup); ok {
 		configRef = usergroup.Spec.ProviderConfigReference
+	} else if repl, ok := mg.(*replicationv1beta1.Replication); ok {
+		configRef = repl.Spec.ProviderConfigReference
+	} else if ret, ok := mg.(*retentionv1beta1.Retention); ok {
+		configRef = ret.Spec.ProviderConfigReference
 	} else {
 		// Fallback: assume the managed resource has ProviderConfigReference
 		// This is a bit of a hack but works for most cases

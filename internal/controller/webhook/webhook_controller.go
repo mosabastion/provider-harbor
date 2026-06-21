@@ -18,6 +18,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rossigee/provider-harbor/apis/webhook/v1beta1"
@@ -113,6 +114,13 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 			}
 
+			// Mark the managed resource Available once it exists AND matches
+			// desired state. crossplane-runtime v2 no longer sets Available()
+			// automatically — readiness is the provider's responsibility.
+			if upToDate {
+				cr.SetConditions(xpv1.Available())
+			}
+
 			return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
 		}
 	}
@@ -125,6 +133,8 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errNotWebhook)
 	}
+
+	cr.SetConditions(xpv1.Creating())
 
 	spec := &harborclients.WebhookSpec{
 		ProjectID:      cr.Spec.ForProvider.ProjectID,
@@ -177,6 +187,8 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalDelete{}, errors.New(errNotWebhook)
 	}
+
+	cr.SetConditions(xpv1.Deleting())
 
 	if cr.Status.AtProvider.ID == nil {
 		return managed.ExternalDelete{}, nil
