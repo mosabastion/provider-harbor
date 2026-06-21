@@ -2561,7 +2561,24 @@ type ReplicationExecution struct {
 //   - SourceRegistry is intentionally left nil (local) because the CR stores only
 //     a human-readable name. Resolving it would require an extra list+match call.
 //   - DeleteSourceTag maps to ReplicateDeletion (the non-deprecated field).
-func replicationPolicyModel(spec *ReplicationPolicySpec) *harbormodels.ReplicationPolicy {
+//
+// resolveDestRegistryID maps the destination registry name to its numeric Harbor
+// id (replication policies reference registries by id, not name).
+func (c *HarborClient) resolveDestRegistryID(ctx context.Context, spec *ReplicationPolicySpec) (int64, error) {
+	if spec.DestinationReg == nil || spec.DestinationReg.Name == "" {
+		return 0, errors.New("destination registry is required")
+	}
+	reg, err := c.findRegistryByName(ctx, spec.DestinationReg.Name)
+	if err != nil {
+		return 0, err
+	}
+	if reg == nil {
+		return 0, errors.Errorf("destination registry %q not found", spec.DestinationReg.Name)
+	}
+	return reg.ID, nil
+}
+
+func replicationPolicyModel(spec *ReplicationPolicySpec, destRegID int64) *harbormodels.ReplicationPolicy {
 	p := &harbormodels.ReplicationPolicy{
 		Name:     spec.Name,
 		Enabled:  spec.Enabled != nil && *spec.Enabled,
@@ -2577,10 +2594,9 @@ func replicationPolicyModel(spec *ReplicationPolicySpec) *harbormodels.Replicati
 		p.Trigger = &harbormodels.ReplicationTrigger{Type: spec.Trigger}
 	}
 	if spec.DestinationReg != nil {
-		p.DestRegistry = &harbormodels.Registry{
-			Name: spec.DestinationReg.Name,
-			URL:  spec.DestinationReg.URL,
-		}
+		// Harbor references the registry by its numeric id; name/url alone yield a
+		// 400. The id is resolved by the caller via findRegistryByName.
+		p.DestRegistry = &harbormodels.Registry{ID: destRegID}
 		p.DestNamespace = spec.DestinationReg.Namespace
 	}
 	if len(spec.Filters) > 0 {
@@ -2667,9 +2683,13 @@ func (c *HarborClient) CreateReplicationPolicy(ctx context.Context, spec *Replic
 		"destination", spec.DestinationReg.Name,
 		"trigger", spec.Trigger)
 
+	destRegID, err := c.resolveDestRegistryID(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
 	params := harborreplication.NewCreateReplicationPolicyParams().
 		WithContext(ctx).
-		WithPolicy(replicationPolicyModel(spec))
+		WithPolicy(replicationPolicyModel(spec, destRegID))
 	resp, err := v2Client.Replication.CreateReplicationPolicy(ctx, params)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot create Harbor replication policy")
@@ -2749,7 +2769,11 @@ func (c *HarborClient) UpdateReplicationPolicy(ctx context.Context, policyID str
 
 	c.logger.Info("Updating Harbor replication policy", "policyId", policyID, "name", spec.Name)
 
-	model := replicationPolicyModel(spec)
+	destRegID, err := c.resolveDestRegistryID(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	model := replicationPolicyModel(spec, destRegID)
 	model.ID = id
 	params := harborreplication.NewUpdateReplicationPolicyParams().
 		WithContext(ctx).
@@ -2903,12 +2927,27 @@ type RetentionPolicyStatus struct {
 //
 // Trigger: "manual" -> Kind="Schedule" with no settings; "scheduled" -> same (cron configurable).
 // Harbor's RetentionPolicy model has no Description, Enabled, or timestamp fields.
-func retentionPolicyModel(spec *RetentionPolicySpec) (*harbormodels.RetentionPolicy, error) {
-	projectIDInt, err := strconv.ParseInt(spec.ProjectID, 10, 64)
-	if err != nil {
-		return nil, errors.Wrap(err, "invalid project ID for retention policy")
+// resolveProjectID returns the numeric Harbor project id for a project reference
+// that may be either a numeric id or a project name.
+func (c *HarborClient) resolveProjectID(ctx context.Context, ref string) (int64, error) {
+	if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
+		return id, nil
 	}
+	st, err := c.GetProject(ctx, ref)
+	if err != nil {
+		return 0, err
+	}
+	if st == nil {
+		return 0, errors.Errorf("project %q not found", ref)
+	}
+	id, err := strconv.ParseInt(st.ID, 10, 64)
+	if err != nil {
+		return 0, errors.Wrapf(err, "project %q has non-numeric id %q", ref, st.ID)
+	}
+	return id, nil
+}
 
+func retentionPolicyModel(spec *RetentionPolicySpec, projectIDInt int64) *harbormodels.RetentionPolicy {
 	rules := make([]*harbormodels.RetentionRule, 0, len(spec.Rules))
 	for _, r := range spec.Rules {
 		rule := &harbormodels.RetentionRule{
@@ -2940,7 +2979,7 @@ func retentionPolicyModel(spec *RetentionPolicySpec) (*harbormodels.RetentionPol
 		},
 		Trigger: &harbormodels.RetentionRuleTrigger{Kind: "Schedule"},
 	}
-	return p, nil
+	return p
 }
 
 // retentionPolicyStatusFromModel converts a Harbor SDK RetentionPolicy to our
@@ -2998,10 +3037,11 @@ func (c *HarborClient) CreateRetentionPolicy(ctx context.Context, spec *Retentio
 		"projectId", spec.ProjectID,
 		"rulesCount", len(spec.Rules))
 
-	model, err := retentionPolicyModel(spec)
+	projectIDInt, err := c.resolveProjectID(ctx, spec.ProjectID)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "invalid project for retention policy")
 	}
+	model := retentionPolicyModel(spec, projectIDInt)
 
 	params := harborretention.NewCreateRetentionParams().WithContext(ctx).WithPolicy(model)
 	resp, err := v2Client.Retention.CreateRetention(ctx, params)
@@ -3120,10 +3160,11 @@ func (c *HarborClient) UpdateRetentionPolicy(ctx context.Context, projectID, pol
 
 	c.logger.Info("Updating Harbor retention policy", "projectId", projectID, "policyId", policyID)
 
-	model, err := retentionPolicyModel(spec)
+	projectIDInt, err := c.resolveProjectID(ctx, spec.ProjectID)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "invalid project for retention policy")
 	}
+	model := retentionPolicyModel(spec, projectIDInt)
 	model.ID = id
 
 	params := harborretention.NewUpdateRetentionParams().WithContext(ctx).WithID(id).WithPolicy(model)

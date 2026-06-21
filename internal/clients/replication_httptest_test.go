@@ -36,6 +36,13 @@ func fakeReplicationServer(t *testing.T) *httptest.Server {
 
 	mux := http.NewServeMux()
 
+	// GET /api/v2.0/registries?name=... -> registry lookup for dest-registry id
+	// resolution (replication policies reference registries by numeric id).
+	mux.HandleFunc("/api/v2.0/registries", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":7,"name":"my-dest-registry","url":"https://dst.example.com"}]`))
+	})
+
 	// POST /api/v2.0/replication/policies -> 201 with Location header
 	// GET  /api/v2.0/replication/policies -> 200 list
 	mux.HandleFunc("/api/v2.0/replication/policies", func(w http.ResponseWriter, r *http.Request) {
