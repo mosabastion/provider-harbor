@@ -2602,10 +2602,20 @@ func replicationPolicyModel(spec *ReplicationPolicySpec, destRegID int64) *harbo
 	if len(spec.Filters) > 0 {
 		p.Filters = make([]*harbormodels.ReplicationFilter, len(spec.Filters))
 		for i, f := range spec.Filters {
-			p.Filters[i] = &harbormodels.ReplicationFilter{Type: f.Type, Value: f.Value}
+			p.Filters[i] = &harbormodels.ReplicationFilter{Type: replicationFilterType(f.Type), Value: f.Value}
 		}
 	}
 	return p
+}
+
+// replicationFilterType maps the CR's filter type to Harbor's. Harbor names the
+// repository filter "name" (its valid types are name/tag/label/resource); the CR
+// exposes it as the friendlier "repository".
+func replicationFilterType(t string) string {
+	if t == "repository" {
+		return "name"
+	}
+	return t
 }
 
 // replicationPolicyStatusFromModel converts a Harbor SDK ReplicationPolicy to our
