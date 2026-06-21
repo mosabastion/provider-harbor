@@ -137,7 +137,9 @@ func userGroupExternalID(cr *v1beta1.UserGroup) string {
 	if en == "" || en == cr.GetName() {
 		return ""
 	}
-	if _, err := strconv.ParseInt(en, 10, 64); err != nil {
+	// Treat a non-positive id as "not set" — Harbor group ids are positive, and a
+	// stray "0" would otherwise poison Observe (GetUserGroup(0) always errors).
+	if id, err := strconv.ParseInt(en, 10, 64); err != nil || id <= 0 {
 		return ""
 	}
 	return en

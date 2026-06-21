@@ -129,7 +129,9 @@ func robotExternalID(cr *v1beta1.Robot) string {
 	if en == "" || en == cr.GetName() {
 		return ""
 	}
-	if _, err := strconv.ParseInt(en, 10, 64); err != nil {
+	// Treat a non-positive id as "not set" — Harbor robot ids are positive, and a
+	// stray "0" would otherwise poison Observe (GetRobot(0) always errors).
+	if id, err := strconv.ParseInt(en, 10, 64); err != nil || id <= 0 {
 		return ""
 	}
 	return en

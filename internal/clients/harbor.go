@@ -3242,6 +3242,9 @@ func (c *HarborClient) CreateUserGroup(ctx context.Context, spec *UserGroupSpec)
 	if st == nil {
 		return nil, errors.New("Harbor user group created but not yet observable")
 	}
+	if st.ID <= 0 {
+		return nil, errors.Errorf("Harbor user group created but returned a non-positive id (%d)", st.ID)
+	}
 	return st, nil
 }
 
