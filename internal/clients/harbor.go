@@ -28,10 +28,21 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/go-openapi/runtime"
+	"github.com/go-openapi/strfmt"
 	"github.com/goharbor/go-client/pkg/harbor"
+	harborartifact "github.com/goharbor/go-client/pkg/sdk/v2.0/client/artifact"
 	harbormember "github.com/goharbor/go-client/pkg/sdk/v2.0/client/member"
 	harborproject "github.com/goharbor/go-client/pkg/sdk/v2.0/client/project"
+	harborregistry "github.com/goharbor/go-client/pkg/sdk/v2.0/client/registry"
+	harborreplication "github.com/goharbor/go-client/pkg/sdk/v2.0/client/replication"
+	harborrepository "github.com/goharbor/go-client/pkg/sdk/v2.0/client/repository"
+	harborretention "github.com/goharbor/go-client/pkg/sdk/v2.0/client/retention"
 	harborrobot "github.com/goharbor/go-client/pkg/sdk/v2.0/client/robot"
+	harborscan "github.com/goharbor/go-client/pkg/sdk/v2.0/client/scan"
+	harborscanner "github.com/goharbor/go-client/pkg/sdk/v2.0/client/scanner"
+	harboruser "github.com/goharbor/go-client/pkg/sdk/v2.0/client/user"
+	harborusergroup "github.com/goharbor/go-client/pkg/sdk/v2.0/client/usergroup"
+	harborwebhook "github.com/goharbor/go-client/pkg/sdk/v2.0/client/webhook"
 	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -178,6 +189,7 @@ type RegistryCredential struct {
 
 // RegistryStatus represents the status of a Harbor registry
 type RegistryStatus struct {
+	ID          int64     `json:"id,omitempty"`
 	Name        string    `json:"name"`
 	Description *string   `json:"description,omitempty"`
 	Type        string    `json:"type"`
@@ -580,7 +592,34 @@ func (c *HarborClient) GetMemoryFootprint() string {
 	return "~5-10MB (Harbor Go client + minimal overhead)"
 }
 
-// CreateScannerRegistration creates a new Harbor scanner registration
+// scannerStatusFromModel converts a Harbor ScannerRegistration model into our ScannerStatus.
+func scannerStatusFromModel(s *harbormodels.ScannerRegistration) *ScannerStatus {
+	if s == nil {
+		return &ScannerStatus{}
+	}
+	st := &ScannerStatus{
+		UUID: s.UUID,
+		Name: s.Name,
+		URL:  string(s.URL),
+		Auth: &s.Auth,
+	}
+	if s.Description != "" {
+		st.Description = &s.Description
+	}
+	if s.AccessCredential != "" {
+		st.AccessCredential = &s.AccessCredential
+	}
+	if t := time.Time(s.CreateTime); !t.IsZero() {
+		st.CreateTime = t
+	}
+	if t := time.Time(s.UpdateTime); !t.IsZero() {
+		st.UpdateTime = t
+	}
+	return st
+}
+
+// CreateScannerRegistration creates a new Harbor scanner registration.
+// Harbor returns the UUID via the Location header; we re-read to get full state.
 func (c *HarborClient) CreateScannerRegistration(ctx context.Context, spec *ScannerSpec) (*ScannerStatus, error) {
 	if spec == nil {
 		return nil, errors.New("scanner spec is required")
@@ -599,30 +638,44 @@ func (c *HarborClient) CreateScannerRegistration(ctx context.Context, spec *Scan
 
 	c.logger.Info("Creating Harbor scanner registration", "name", spec.Name, "url", spec.URL)
 
-	// The actual Harbor API call would be implemented here
-	// scannerReq := &models.ScannerRegistration{
-	//     Name: spec.Name,
-	//     URL: spec.URL,
-	// }
-	// _, err := v2Client.Scanner.CreateScannerRegistration(ctx, &scanner.CreateScannerRegistrationParams{
-	//     Registration: scannerReq,
-	// })
-
-	status := &ScannerStatus{
-		UUID:             "uuid-" + spec.Name,
-		Name:             spec.Name,
-		Description:      spec.Description,
-		URL:              spec.URL,
-		Auth:             spec.Auth,
-		AccessCredential: spec.AccessCredential,
-		CreateTime:       time.Now(),
-		UpdateTime:       time.Now(),
+	scannerURL := strfmt.URI(spec.URL)
+	req := &harbormodels.ScannerRegistrationReq{
+		Name: &spec.Name,
+		URL:  &scannerURL,
+	}
+	if spec.Description != nil {
+		req.Description = *spec.Description
+	}
+	if spec.Auth != nil {
+		req.Auth = *spec.Auth
+	}
+	if spec.AccessCredential != nil {
+		req.AccessCredential = *spec.AccessCredential
 	}
 
-	return status, nil
+	createParams := harborscanner.NewCreateScannerParams().WithContext(ctx).WithRegistration(req)
+	resp, err := v2Client.Scanner.CreateScanner(ctx, createParams)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor scanner registration")
+	}
+
+	// The UUID is embedded in the Location header path: /api/v2.0/scanners/{uuid}
+	location := resp.Location
+	uuid := location[strings.LastIndex(location, "/")+1:]
+
+	// Re-read to get authoritative state.
+	st, err := c.GetScannerRegistration(ctx, uuid)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor scanner created but not yet observable")
+	}
+	return st, nil
 }
 
-// GetScannerRegistration retrieves a Harbor scanner registration by UUID or name
+// GetScannerRegistration retrieves a Harbor scanner registration by its UUID.
+// Returns (nil, nil) when the registration is absent.
 func (c *HarborClient) GetScannerRegistration(ctx context.Context, scannerID string) (*ScannerStatus, error) {
 	if scannerID == "" {
 		return nil, errors.New("scanner ID is required")
@@ -635,25 +688,19 @@ func (c *HarborClient) GetScannerRegistration(ctx context.Context, scannerID str
 
 	c.logger.Info("Retrieving Harbor scanner registration", "id", scannerID)
 
-	// The actual Harbor API call would be implemented here
-	// status, err := v2Client.Scanner.GetScannerRegistration(ctx, &scanner.GetScannerRegistrationParams{
-	//     RegistrationID: scannerID,
-	// })
-
-	status := &ScannerStatus{
-		UUID:        scannerID,
-		Name:        "Trivy Scanner",
-		Description: func() *string { s := "External Trivy vulnerability scanner"; return &s }(),
-		URL:         "http://trivy.trivy.svc.cluster.local:4954",
-		Auth:        func() *string { s := "Bearer"; return &s }(),
-		CreateTime:  time.Now().Add(-24 * time.Hour),
-		UpdateTime:  time.Now().Add(-24 * time.Hour),
+	params := harborscanner.NewGetScannerParams().WithContext(ctx).WithRegistrationID(scannerID)
+	resp, err := v2Client.Scanner.GetScanner(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor scanner registration")
 	}
 
-	return status, nil
+	return scannerStatusFromModel(resp.Payload), nil
 }
 
-// UpdateScannerRegistration updates an existing Harbor scanner registration
+// UpdateScannerRegistration updates an existing Harbor scanner registration.
 func (c *HarborClient) UpdateScannerRegistration(ctx context.Context, scannerID string, spec *ScannerSpec) (*ScannerStatus, error) {
 	if scannerID == "" {
 		return nil, errors.New("scanner ID is required")
@@ -669,31 +716,32 @@ func (c *HarborClient) UpdateScannerRegistration(ctx context.Context, scannerID 
 
 	c.logger.Info("Updating Harbor scanner registration", "id", scannerID, "name", spec.Name)
 
-	// The actual Harbor API call would be implemented here
-	// scannerReq := &models.ScannerRegistration{
-	//     Name: spec.Name,
-	//     URL: spec.URL,
-	// }
-	// err := v2Client.Scanner.UpdateScannerRegistration(ctx, &scanner.UpdateScannerRegistrationParams{
-	//     RegistrationID: scannerID,
-	//     Registration: scannerReq,
-	// })
-
-	status := &ScannerStatus{
-		UUID:             scannerID,
-		Name:             spec.Name,
-		Description:      spec.Description,
-		URL:              spec.URL,
-		Auth:             spec.Auth,
-		AccessCredential: spec.AccessCredential,
-		CreateTime:       time.Now().Add(-24 * time.Hour),
-		UpdateTime:       time.Now(),
+	updaterURL := strfmt.URI(spec.URL)
+	req := &harbormodels.ScannerRegistrationReq{
+		Name: &spec.Name,
+		URL:  &updaterURL,
+	}
+	if spec.Description != nil {
+		req.Description = *spec.Description
+	}
+	if spec.Auth != nil {
+		req.Auth = *spec.Auth
+	}
+	if spec.AccessCredential != nil {
+		req.AccessCredential = *spec.AccessCredential
 	}
 
-	return status, nil
+	updateParams := harborscanner.NewUpdateScannerParams().WithContext(ctx).
+		WithRegistrationID(scannerID).
+		WithRegistration(req)
+	if _, err := v2Client.Scanner.UpdateScanner(ctx, updateParams); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor scanner registration")
+	}
+
+	return c.GetScannerRegistration(ctx, scannerID)
 }
 
-// DeleteScannerRegistration deletes a Harbor scanner registration
+// DeleteScannerRegistration deletes a Harbor scanner registration. Idempotent on 404.
 func (c *HarborClient) DeleteScannerRegistration(ctx context.Context, scannerID string) error {
 	if scannerID == "" {
 		return errors.New("scanner ID is required")
@@ -706,15 +754,17 @@ func (c *HarborClient) DeleteScannerRegistration(ctx context.Context, scannerID 
 
 	c.logger.Info("Deleting Harbor scanner registration", "id", scannerID)
 
-	// The actual Harbor API call would be implemented here
-	// err := v2Client.Scanner.DeleteScannerRegistration(ctx, &scanner.DeleteScannerRegistrationParams{
-	//     RegistrationID: scannerID,
-	// })
-
+	params := harborscanner.NewDeleteScannerParams().WithContext(ctx).WithRegistrationID(scannerID)
+	if _, err := v2Client.Scanner.DeleteScanner(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor scanner registration")
+	}
 	return nil
 }
 
-// ListScannerRegistrations lists Harbor scanner registrations
+// ListScannerRegistrations lists Harbor scanner registrations.
 func (c *HarborClient) ListScannerRegistrations(ctx context.Context) ([]*ScannerStatus, error) {
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
@@ -723,22 +773,62 @@ func (c *HarborClient) ListScannerRegistrations(ctx context.Context) ([]*Scanner
 
 	c.logger.Info("Listing Harbor scanner registrations")
 
-	// The actual Harbor API call would be implemented here
-	// scanners, err := v2Client.Scanner.ListScannerRegistrations(ctx, &scanner.ListScannerRegistrationsParams{})
-
-	scanners := []*ScannerStatus{
-		{
-			UUID:        "uuid-trivy",
-			Name:        "Trivy Scanner",
-			Description: func() *string { s := "External Trivy vulnerability scanner"; return &s }(),
-			URL:         "http://trivy.trivy.svc.cluster.local:4954",
-			Auth:        func() *string { s := "Bearer"; return &s }(),
-			CreateTime:  time.Now().Add(-7 * 24 * time.Hour),
-			UpdateTime:  time.Now().Add(-7 * 24 * time.Hour),
-		},
+	params := harborscanner.NewListScannersParams().WithContext(ctx)
+	resp, err := v2Client.Scanner.ListScanners(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor scanner registrations")
 	}
 
-	return scanners, nil
+	out := make([]*ScannerStatus, 0, len(resp.Payload))
+	for _, s := range resp.Payload {
+		if s != nil {
+			out = append(out, scannerStatusFromModel(s))
+		}
+	}
+	return out, nil
+}
+
+// userStatusFromModel converts a Harbor UserResp model into our UserStatus.
+func userStatusFromModel(u *harbormodels.UserResp) *UserStatus {
+	if u == nil {
+		return &UserStatus{}
+	}
+	st := &UserStatus{
+		Username:  u.Username,
+		Email:     u.Email,
+		AdminFlag: u.SysadminFlag,
+	}
+	if t := time.Time(u.CreationTime); !t.IsZero() {
+		st.CreatedAt = t
+	}
+	return st
+}
+
+// findUserByUsername locates a Harbor user by username using ListUsers with an
+// exact-match query filter. Harbor's GetUser requires a numeric user_id, but the
+// CR addresses by username, so we list-and-match. Returns (nil, nil) when absent.
+func (c *HarborClient) findUserByUsername(ctx context.Context, username string) (*harbormodels.UserResp, error) {
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+
+	// The q param supports "username=<value>" for an exact match.
+	q := "username=" + username
+	params := harboruser.NewListUsersParams().WithContext(ctx).WithQ(&q)
+	resp, err := v2Client.User.ListUsers(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor users")
+	}
+	for _, u := range resp.Payload {
+		if u != nil && u.Username == username {
+			return u, nil
+		}
+	}
+	return nil, nil
 }
 
 // CreateUser creates a new Harbor user
@@ -760,53 +850,65 @@ func (c *HarborClient) CreateUser(ctx context.Context, spec *UserSpec) (*UserSta
 
 	c.logger.Info("Creating Harbor user", "username", spec.Username, "email", spec.Email)
 
-	// The actual Harbor API call would be implemented here
-	// userReq := &models.UserCreationReq{
-	//     Username: spec.Username,
-	//     Email: spec.Email,
-	//     Password: spec.Password,
-	// }
-	// _, err := v2Client.User.CreateUser(ctx, &user.CreateUserParams{
-	//     UserReq: userReq,
-	// })
-
-	status := &UserStatus{
-		Username:  spec.Username,
-		Email:     spec.Email,
-		AdminFlag: spec.AdminFlag,
-		CreatedAt: time.Now(),
+	req := &harbormodels.UserCreationReq{
+		Username: spec.Username,
+		Email:    spec.Email,
+		Password: spec.Password,
+		Realname: spec.Username,
+	}
+	createParams := harboruser.NewCreateUserParams().WithContext(ctx).WithUserReq(req)
+	if _, err := v2Client.User.CreateUser(ctx, createParams); err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor user")
 	}
 
-	return status, nil
+	// If the user should be a sysadmin, set that flag now (separate API call).
+	if spec.AdminFlag {
+		u, err := c.findUserByUsername(ctx, spec.Username)
+		if err != nil {
+			return nil, errors.Wrap(err, "cannot find user after creation")
+		}
+		if u != nil {
+			sysAdminParams := harboruser.NewSetUserSysAdminParams().WithContext(ctx).
+				WithUserID(u.UserID).
+				WithSysadminFlag(&harbormodels.UserSysAdminFlag{SysadminFlag: true})
+			if _, err := v2Client.User.SetUserSysAdmin(ctx, sysAdminParams); err != nil {
+				return nil, errors.Wrap(err, "cannot set Harbor user sysadmin flag")
+			}
+		}
+	}
+
+	// Re-read to get authoritative state.
+	st, err := c.GetUser(ctx, spec.Username)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor user created but not yet observable")
+	}
+	return st, nil
 }
 
-// GetUser retrieves a Harbor user by username
+// GetUser retrieves a Harbor user by username.
+// Harbor's GetUser API requires a numeric user_id; we locate the user via a
+// filtered ListUsers call and return (nil, nil) when no matching user is found.
 func (c *HarborClient) GetUser(ctx context.Context, username string) (*UserStatus, error) {
 	if username == "" {
 		return nil, errors.New("username is required")
 	}
 
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
-	}
-
 	c.logger.Info("Retrieving Harbor user", "username", username)
 
-	// The actual Harbor API call would be implemented here
-	// user, err := v2Client.User.GetUser(ctx, &user.GetUserParams{UserID: username})
-
-	status := &UserStatus{
-		Username:  username,
-		Email:     username + "@example.com",
-		AdminFlag: false,
-		CreatedAt: time.Now().Add(-24 * time.Hour),
+	u, err := c.findUserByUsername(ctx, username)
+	if err != nil {
+		return nil, err
 	}
-
-	return status, nil
+	if u == nil {
+		return nil, nil
+	}
+	return userStatusFromModel(u), nil
 }
 
-// UpdateUser updates an existing Harbor user
+// UpdateUser updates an existing Harbor user's profile and sysadmin flag.
 func (c *HarborClient) UpdateUser(ctx context.Context, username string, spec *UserSpec) (*UserStatus, error) {
 	if username == "" {
 		return nil, errors.New("username is required")
@@ -822,24 +924,34 @@ func (c *HarborClient) UpdateUser(ctx context.Context, username string, spec *Us
 
 	c.logger.Info("Updating Harbor user", "username", username, "email", spec.Email)
 
-	// The actual Harbor API call would be implemented here
-	// userReq := &models.UserProfile{Email: spec.Email}
-	// err := v2Client.User.UpdateUser(ctx, &user.UpdateUserParams{
-	//     UserID: username,
-	//     Profile: userReq,
-	// })
-
-	status := &UserStatus{
-		Username:  username,
-		Email:     spec.Email,
-		AdminFlag: spec.AdminFlag,
-		CreatedAt: time.Now().Add(-24 * time.Hour),
+	// Find the numeric user id required by the update API.
+	u, err := c.findUserByUsername(ctx, username)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot find user for update")
+	}
+	if u == nil {
+		return nil, errors.Errorf("Harbor user %q not found", username)
 	}
 
-	return status, nil
+	profileParams := harboruser.NewUpdateUserProfileParams().WithContext(ctx).
+		WithUserID(u.UserID).
+		WithProfile(&harbormodels.UserProfile{Email: spec.Email})
+	if _, err := v2Client.User.UpdateUserProfile(ctx, profileParams); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor user profile")
+	}
+
+	// Update sysadmin flag separately.
+	sysAdminParams := harboruser.NewSetUserSysAdminParams().WithContext(ctx).
+		WithUserID(u.UserID).
+		WithSysadminFlag(&harbormodels.UserSysAdminFlag{SysadminFlag: spec.AdminFlag})
+	if _, err := v2Client.User.SetUserSysAdmin(ctx, sysAdminParams); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor user sysadmin flag")
+	}
+
+	return c.GetUser(ctx, username)
 }
 
-// DeleteUser deletes a Harbor user
+// DeleteUser deletes a Harbor user. Idempotent: absent user is already-gone.
 func (c *HarborClient) DeleteUser(ctx context.Context, username string) error {
 	if username == "" {
 		return errors.New("username is required")
@@ -852,13 +964,75 @@ func (c *HarborClient) DeleteUser(ctx context.Context, username string) error {
 
 	c.logger.Info("Deleting Harbor user", "username", username)
 
-	// The actual Harbor API call would be implemented here
-	// err := v2Client.User.DeleteUser(ctx, &user.DeleteUserParams{UserID: username})
+	u, err := c.findUserByUsername(ctx, username)
+	if err != nil {
+		return errors.Wrap(err, "cannot find user for deletion")
+	}
+	if u == nil {
+		// Already absent — idempotent.
+		return nil
+	}
 
+	delParams := harboruser.NewDeleteUserParams().WithContext(ctx).WithUserID(u.UserID)
+	if _, err := v2Client.User.DeleteUser(ctx, delParams); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor user")
+	}
 	return nil
 }
 
-// CreateRegistry creates a new Harbor registry
+// registryStatusFromModel converts a Harbor API Registry model to RegistryStatus.
+func registryStatusFromModel(r *harbormodels.Registry) *RegistryStatus {
+	if r == nil {
+		return &RegistryStatus{}
+	}
+	st := &RegistryStatus{
+		ID:   r.ID,
+		Name: r.Name,
+		Type: r.Type,
+		URL:  r.URL,
+	}
+	if r.Description != "" {
+		st.Description = ptr.To(r.Description)
+	}
+	if t := time.Time(r.CreationTime); !t.IsZero() {
+		st.CreatedAt = t
+	}
+	if t := time.Time(r.UpdateTime); !t.IsZero() {
+		st.UpdatedAt = t
+	}
+	return st
+}
+
+// findRegistryByName lists registries filtered by name and returns the first
+// exact match. Harbor's registry API is keyed by numeric ID; we use the list
+// endpoint (which accepts a name query) to resolve name -> numeric ID.
+// Returns (nil, nil) when no registry matches the name.
+func (c *HarborClient) findRegistryByName(ctx context.Context, name string) (*harbormodels.Registry, error) {
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+	params := harborregistry.NewListRegistriesParams().WithContext(ctx).WithName(ptr.To(name))
+	resp, err := v2Client.Registry.ListRegistries(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor registries")
+	}
+	for _, r := range resp.Payload {
+		if r != nil && r.Name == name {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateRegistry creates a new Harbor registry.
+// Harbor returns only a Location header on create, so we re-read by name after.
 func (c *HarborClient) CreateRegistry(ctx context.Context, spec *RegistrySpec) (*RegistryStatus, error) {
 	if spec == nil {
 		return nil, errors.New("registry spec is required")
@@ -877,59 +1051,60 @@ func (c *HarborClient) CreateRegistry(ctx context.Context, spec *RegistrySpec) (
 
 	c.logger.Info("Creating Harbor registry", "name", spec.Name, "url", spec.URL, "type", spec.Type)
 
-	// The actual Harbor API call would be implemented here
-	// registryReq := &models.RegistryUpdate{
-	//     Name: spec.Name,
-	//     URL: spec.URL,
-	//     Type: spec.Type,
-	// }
-	// _, err := v2Client.Registry.CreateRegistry(ctx, &registry.CreateRegistryParams{
-	//     Registry: registryReq,
-	// })
-
-	status := &RegistryStatus{
-		Name:        spec.Name,
-		Description: spec.Description,
-		Type:        spec.Type,
-		URL:         spec.URL,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+	req := &harbormodels.Registry{
+		Name:     spec.Name,
+		Type:     spec.Type,
+		URL:      spec.URL,
+		Insecure: spec.Insecure,
+	}
+	if spec.Description != nil {
+		req.Description = *spec.Description
+	}
+	if spec.Credential != nil {
+		req.Credential = &harbormodels.RegistryCredential{
+			Type:         spec.Credential.Type,
+			AccessKey:    spec.Credential.AccessKey,
+			AccessSecret: spec.Credential.AccessSecret,
+		}
 	}
 
-	return status, nil
+	params := harborregistry.NewCreateRegistryParams().WithContext(ctx).WithRegistry(req)
+	if _, err := v2Client.Registry.CreateRegistry(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor registry")
+	}
+
+	// Re-read to get the authoritative ID assigned by Harbor.
+	st, err := c.GetRegistry(ctx, spec.Name)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor registry created but not yet observable")
+	}
+	return st, nil
 }
 
-// GetRegistry retrieves a Harbor registry by name
+// GetRegistry retrieves a Harbor registry by name, returning (nil, nil) when absent.
+// Harbor's registry API is keyed by numeric ID; we list+match by name to resolve.
 func (c *HarborClient) GetRegistry(ctx context.Context, registryName string) (*RegistryStatus, error) {
 	if registryName == "" {
 		return nil, errors.New("registry name is required")
 	}
 
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
-	}
-
 	c.logger.Info("Retrieving Harbor registry", "name", registryName)
 
-	// The actual Harbor API call would be implemented here
-	// registry, err := v2Client.Registry.GetRegistry(ctx, &registry.GetRegistryParams{
-	//     RegistryID: registryName,
-	// })
-
-	status := &RegistryStatus{
-		Name:        registryName,
-		Description: func() *string { s := "External registry"; return &s }(),
-		Type:        "docker-registry",
-		URL:         "https://registry.example.com",
-		CreatedAt:   time.Now().Add(-24 * time.Hour),
-		UpdatedAt:   time.Now().Add(-24 * time.Hour),
+	r, err := c.findRegistryByName(ctx, registryName)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot get Harbor registry")
 	}
-
-	return status, nil
+	if r == nil {
+		return nil, nil
+	}
+	return registryStatusFromModel(r), nil
 }
 
-// UpdateRegistry updates an existing Harbor registry
+// UpdateRegistry updates an existing Harbor registry identified by name.
+// The numeric ID is resolved via list+match before calling PUT /registries/{id}.
 func (c *HarborClient) UpdateRegistry(ctx context.Context, registryName string, spec *RegistrySpec) (*RegistryStatus, error) {
 	if registryName == "" {
 		return nil, errors.New("registry name is required")
@@ -945,30 +1120,38 @@ func (c *HarborClient) UpdateRegistry(ctx context.Context, registryName string, 
 
 	c.logger.Info("Updating Harbor registry", "name", registryName, "url", spec.URL, "type", spec.Type)
 
-	// The actual Harbor API call would be implemented here
-	// registryReq := &models.RegistryUpdate{
-	//     Name: spec.Name,
-	//     URL: spec.URL,
-	//     Type: spec.Type,
-	// }
-	// err := v2Client.Registry.UpdateRegistry(ctx, &registry.UpdateRegistryParams{
-	//     RegistryID: registryName,
-	//     Registry: registryReq,
-	// })
-
-	status := &RegistryStatus{
-		Name:        registryName,
-		Description: spec.Description,
-		Type:        spec.Type,
-		URL:         spec.URL,
-		CreatedAt:   time.Now().Add(-24 * time.Hour),
-		UpdatedAt:   time.Now(),
+	r, err := c.findRegistryByName(ctx, registryName)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot resolve registry ID for update")
+	}
+	if r == nil {
+		return nil, errors.Errorf("Harbor registry %q not found", registryName)
 	}
 
-	return status, nil
+	upd := &harbormodels.RegistryUpdate{
+		Name: ptr.To(spec.Name),
+		URL:  ptr.To(spec.URL),
+	}
+	if spec.Description != nil {
+		upd.Description = spec.Description
+	}
+	upd.Insecure = ptr.To(spec.Insecure)
+	if spec.Credential != nil {
+		upd.CredentialType = ptr.To(spec.Credential.Type)
+		upd.AccessKey = ptr.To(spec.Credential.AccessKey)
+		upd.AccessSecret = ptr.To(spec.Credential.AccessSecret)
+	}
+
+	params := harborregistry.NewUpdateRegistryParams().WithContext(ctx).WithID(r.ID).WithRegistry(upd)
+	if _, err := v2Client.Registry.UpdateRegistry(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor registry")
+	}
+
+	return c.GetRegistry(ctx, registryName)
 }
 
-// DeleteRegistry deletes a Harbor registry
+// DeleteRegistry deletes a Harbor registry (idempotent on not-found).
+// The numeric ID is resolved via list+match before calling DELETE /registries/{id}.
 func (c *HarborClient) DeleteRegistry(ctx context.Context, registryName string) error {
 	if registryName == "" {
 		return errors.New("registry name is required")
@@ -981,11 +1164,22 @@ func (c *HarborClient) DeleteRegistry(ctx context.Context, registryName string) 
 
 	c.logger.Info("Deleting Harbor registry", "name", registryName)
 
-	// The actual Harbor API call would be implemented here
-	// err := v2Client.Registry.DeleteRegistry(ctx, &registry.DeleteRegistryParams{
-	//     RegistryID: registryName,
-	// })
+	r, err := c.findRegistryByName(ctx, registryName)
+	if err != nil {
+		return errors.Wrap(err, "cannot resolve registry ID for delete")
+	}
+	if r == nil {
+		// Already gone — idempotent.
+		return nil
+	}
 
+	params := harborregistry.NewDeleteRegistryParams().WithContext(ctx).WithID(r.ID)
+	if _, err := v2Client.Registry.DeleteRegistry(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor registry")
+	}
 	return nil
 }
 
@@ -1007,7 +1201,28 @@ type RepositoryStatus struct {
 	Description   string    `json:"description"`
 }
 
-// ListRepositories lists repositories in a Harbor project
+// repositoryStatusFromModel converts a Harbor API Repository model to RepositoryStatus.
+func repositoryStatusFromModel(r *harbormodels.Repository) *RepositoryStatus {
+	if r == nil {
+		return &RepositoryStatus{}
+	}
+	st := &RepositoryStatus{
+		ID:            strconv.FormatInt(r.ID, 10),
+		FullName:      r.Name,
+		ProjectID:     strconv.FormatInt(r.ProjectID, 10),
+		ArtifactCount: r.ArtifactCount,
+		Description:   r.Description,
+	}
+	if r.CreationTime != nil {
+		st.CreationTime = time.Time(*r.CreationTime)
+	}
+	if t := time.Time(r.UpdateTime); !t.IsZero() {
+		st.UpdateTime = t
+	}
+	return st
+}
+
+// ListRepositories lists repositories in a Harbor project.
 func (c *HarborClient) ListRepositories(ctx context.Context, projectID string) ([]*RepositoryStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1020,27 +1235,28 @@ func (c *HarborClient) ListRepositories(ctx context.Context, projectID string) (
 
 	c.logger.Info("Listing Harbor repositories", "projectId", projectID)
 
-	// The actual Harbor API call would be implemented here
-	// repositories, err := v2Client.Repository.ListRepositories(ctx, &repository.ListRepositoriesParams{
-	//     ProjectID: projectID,
-	// })
-
-	repos := []*RepositoryStatus{
-		{
-			ID:            "1",
-			FullName:      projectID + "/my-app",
-			ProjectID:     projectID,
-			ArtifactCount: 5,
-			CreationTime:  time.Now().Add(-7 * 24 * time.Hour),
-			UpdateTime:    time.Now().Add(-1 * time.Hour),
-			Description:   "My application repository",
-		},
+	params := harborrepository.NewListRepositoriesParams().WithContext(ctx).WithProjectName(projectID)
+	resp, err := v2Client.Repository.ListRepositories(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor repositories")
 	}
 
+	repos := make([]*RepositoryStatus, 0, len(resp.Payload))
+	for _, r := range resp.Payload {
+		if r != nil {
+			repos = append(repos, repositoryStatusFromModel(r))
+		}
+	}
 	return repos, nil
 }
 
-// GetRepository retrieves a specific Harbor repository
+// GetRepository retrieves a specific Harbor repository, returning (nil, nil) when absent.
+// The repository_name path parameter must be URL-encoded once by the SDK. If the name
+// itself contains slashes (e.g. "a/b"), it must be encoded again by the caller so the
+// final wire value is double-encoded (a/b -> a%2Fb -> a%252Fb).
 func (c *HarborClient) GetRepository(ctx context.Context, projectID, repoName string) (*RepositoryStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1056,26 +1272,21 @@ func (c *HarborClient) GetRepository(ctx context.Context, projectID, repoName st
 
 	c.logger.Info("Retrieving Harbor repository", "projectId", projectID, "name", repoName)
 
-	// The actual Harbor API call would be implemented here
-	// repository, err := v2Client.Repository.GetRepository(ctx, &repository.GetRepositoryParams{
-	//     ProjectID: projectID,
-	//     RepositoryName: repoName,
-	// })
-
-	status := &RepositoryStatus{
-		ID:            "1",
-		FullName:      projectID + "/" + repoName,
-		ProjectID:     projectID,
-		ArtifactCount: 5,
-		CreationTime:  time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:    time.Now(),
-		Description:   "Repository description",
+	params := harborrepository.NewGetRepositoryParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName)
+	resp, err := v2Client.Repository.GetRepository(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor repository")
 	}
 
-	return status, nil
+	return repositoryStatusFromModel(resp.Payload), nil
 }
 
-// UpdateRepository updates a Harbor repository
+// UpdateRepository updates a Harbor repository's description.
 func (c *HarborClient) UpdateRepository(ctx context.Context, projectID, repoName string, spec *RepositorySpec) (*RepositoryStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1094,26 +1305,23 @@ func (c *HarborClient) UpdateRepository(ctx context.Context, projectID, repoName
 
 	c.logger.Info("Updating Harbor repository", "projectId", projectID, "name", repoName)
 
-	// The actual Harbor API call would be implemented here
-	// err := v2Client.Repository.UpdateRepository(ctx, &repository.UpdateRepositoryParams{
-	//     ProjectID: projectID,
-	//     RepositoryName: repoName,
-	// })
-
-	status := &RepositoryStatus{
-		ID:            "1",
-		FullName:      projectID + "/" + repoName,
-		ProjectID:     projectID,
-		ArtifactCount: 5,
-		CreationTime:  time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:    time.Now(),
-		Description:   *spec.Description,
+	repo := &harbormodels.Repository{}
+	if spec.Description != nil {
+		repo.Description = *spec.Description
 	}
 
-	return status, nil
+	params := harborrepository.NewUpdateRepositoryParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithRepository(repo)
+	if _, err := v2Client.Repository.UpdateRepository(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor repository")
+	}
+
+	return c.GetRepository(ctx, projectID, repoName)
 }
 
-// DeleteRepository deletes a Harbor repository
+// DeleteRepository deletes a Harbor repository (idempotent on not-found).
 func (c *HarborClient) DeleteRepository(ctx context.Context, projectID, repoName string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1129,12 +1337,15 @@ func (c *HarborClient) DeleteRepository(ctx context.Context, projectID, repoName
 
 	c.logger.Info("Deleting Harbor repository", "projectId", projectID, "name", repoName)
 
-	// The actual Harbor API call would be implemented here
-	// err := v2Client.Repository.DeleteRepository(ctx, &repository.DeleteRepositoryParams{
-	//     ProjectID: projectID,
-	//     RepositoryName: repoName,
-	// })
-
+	params := harborrepository.NewDeleteRepositoryParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName)
+	if _, err := v2Client.Repository.DeleteRepository(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor repository")
+	}
 	return nil
 }
 
@@ -1157,7 +1368,32 @@ type ArtifactStatus struct {
 	VulnerabilityCount int64
 }
 
-// ListArtifacts lists artifacts in a Harbor repository
+// artifactStatusFromModel converts a Harbor SDK Artifact model into ArtifactStatus.
+// VulnerabilityCount is the total from the first scan_overview entry found
+// (ScanOverview is a map keyed by MIME type); 0 when no scan data exists.
+func artifactStatusFromModel(a *harbormodels.Artifact) *ArtifactStatus {
+	if a == nil {
+		return nil
+	}
+	st := &ArtifactStatus{
+		ID:           strconv.FormatInt(a.ID, 10),
+		Digest:       a.Digest,
+		Size:         a.Size,
+		CreationTime: time.Time(a.PushTime),
+		UpdateTime:   time.Time(a.PullTime),
+	}
+	for _, rep := range a.ScanOverview {
+		if rep.Summary != nil {
+			for _, v := range rep.Summary.Summary {
+				st.VulnerabilityCount += v
+			}
+		}
+		break
+	}
+	return st
+}
+
+// ListArtifacts lists artifacts in a Harbor repository.
 func (c *HarborClient) ListArtifacts(ctx context.Context, projectID, repoName string) ([]*ArtifactStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1173,22 +1409,30 @@ func (c *HarborClient) ListArtifacts(ctx context.Context, projectID, repoName st
 
 	c.logger.Info("Listing Harbor artifacts", "projectId", projectID, "repo", repoName)
 
-	artifacts := []*ArtifactStatus{
-		{
-			ID:                 "1",
-			Digest:             "sha256:abc123",
-			Size:               1024000,
-			PullCount:          5,
-			CreationTime:       time.Now().Add(-7 * 24 * time.Hour),
-			UpdateTime:         time.Now(),
-			VulnerabilityCount: 0,
-		},
+	withScan := true
+	params := harborartifact.NewListArtifactsParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithWithScanOverview(&withScan)
+	resp, err := v2Client.Artifact.ListArtifacts(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor artifacts")
 	}
 
-	return artifacts, nil
+	out := make([]*ArtifactStatus, 0, len(resp.Payload))
+	for _, a := range resp.Payload {
+		if a != nil {
+			out = append(out, artifactStatusFromModel(a))
+		}
+	}
+	return out, nil
 }
 
-// GetArtifact retrieves a specific Harbor artifact
+// GetArtifact retrieves a specific Harbor artifact by project, repository, and
+// reference (tag or digest). Returns (nil, nil) if the artifact is not found.
 func (c *HarborClient) GetArtifact(ctx context.Context, projectID, repoName, reference string) (*ArtifactStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1207,20 +1451,24 @@ func (c *HarborClient) GetArtifact(ctx context.Context, projectID, repoName, ref
 
 	c.logger.Info("Retrieving Harbor artifact", "projectId", projectID, "repo", repoName, "reference", reference)
 
-	status := &ArtifactStatus{
-		ID:                 "1",
-		Digest:             "sha256:abc123",
-		Size:               1024000,
-		PullCount:          5,
-		CreationTime:       time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:         time.Now(),
-		VulnerabilityCount: 0,
+	withScan := true
+	params := harborartifact.NewGetArtifactParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithReference(reference).
+		WithWithScanOverview(&withScan)
+	resp, err := v2Client.Artifact.GetArtifact(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor artifact")
 	}
 
-	return status, nil
+	return artifactStatusFromModel(resp.Payload), nil
 }
 
-// DeleteArtifact deletes a Harbor artifact
+// DeleteArtifact deletes a Harbor artifact. Idempotent: 404 is treated as success.
 func (c *HarborClient) DeleteArtifact(ctx context.Context, projectID, repoName, reference string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1239,39 +1487,24 @@ func (c *HarborClient) DeleteArtifact(ctx context.Context, projectID, repoName, 
 
 	c.logger.Info("Deleting Harbor artifact", "projectId", projectID, "repo", repoName, "reference", reference)
 
+	params := harborartifact.NewDeleteArtifactParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithReference(reference)
+	if _, err := v2Client.Artifact.DeleteArtifact(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor artifact")
+	}
 	return nil
 }
 
-// GetArtifactVulnerabilities retrieves vulnerability information for an artifact
+// GetArtifactVulnerabilities retrieves an artifact with its scan/vulnerability
+// overview, delegating to GetArtifact which already requests with_scan_overview.
+// Returns (nil, nil) if the artifact is not found.
 func (c *HarborClient) GetArtifactVulnerabilities(ctx context.Context, projectID, repoName, reference string) (*ArtifactStatus, error) {
-	if projectID == "" {
-		return nil, errors.New("project ID is required")
-	}
-	if repoName == "" {
-		return nil, errors.New("repository name is required")
-	}
-	if reference == "" {
-		return nil, errors.New("reference is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Retrieving artifact vulnerabilities", "projectId", projectID, "repo", repoName, "reference", reference)
-
-	status := &ArtifactStatus{
-		ID:                 "1",
-		Digest:             "sha256:abc123",
-		Size:               1024000,
-		PullCount:          5,
-		CreationTime:       time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:         time.Now(),
-		VulnerabilityCount: 2,
-	}
-
-	return status, nil
+	return c.GetArtifact(ctx, projectID, repoName, reference)
 }
 
 // MemberStatus represents a Harbor project member
@@ -1551,7 +1784,9 @@ type ScanStatus struct {
 	EndTime       time.Time
 }
 
-// TriggerScan triggers a vulnerability scan for an artifact
+// TriggerScan triggers a vulnerability scan on the specified artifact.
+// Harbor returns 202 Accepted; the scan runs asynchronously. Use GetScan to
+// poll the result via the artifact's scan_overview.
 func (c *HarborClient) TriggerScan(ctx context.Context, projectID, repoName, reference string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1570,10 +1805,19 @@ func (c *HarborClient) TriggerScan(ctx context.Context, projectID, repoName, ref
 
 	c.logger.Info("Triggering Harbor artifact scan", "projectId", projectID, "repo", repoName, "reference", reference)
 
+	params := harborscan.NewScanArtifactParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithReference(reference)
+	if _, err := v2Client.Scan.ScanArtifact(ctx, params); err != nil {
+		return errors.Wrap(err, "cannot trigger Harbor artifact scan")
+	}
 	return nil
 }
 
-// ListScans lists scans for an artifact
+// ListScans lists scan results for all artifacts in a repository. Each artifact's
+// scan status is sourced from its scan_overview (first MIME-type entry).
+// Artifacts with no scan data produce a ScanStatus with Status="".
 func (c *HarborClient) ListScans(ctx context.Context, projectID, repoName string) ([]*ScanStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1589,23 +1833,53 @@ func (c *HarborClient) ListScans(ctx context.Context, projectID, repoName string
 
 	c.logger.Info("Listing Harbor artifact scans", "projectId", projectID, "repo", repoName)
 
-	scans := []*ScanStatus{
-		{
-			ID:            "1",
-			Status:        "completed",
-			CriticalCount: 0,
-			HighCount:     1,
-			MediumCount:   3,
-			LowCount:      5,
-			StartTime:     time.Now().Add(-1 * time.Hour),
-			EndTime:       time.Now(),
-		},
+	withScan := true
+	params := harborartifact.NewListArtifactsParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithWithScanOverview(&withScan)
+	resp, err := v2Client.Artifact.ListArtifacts(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor artifacts for scans")
 	}
 
-	return scans, nil
+	out := make([]*ScanStatus, 0, len(resp.Payload))
+	for _, a := range resp.Payload {
+		if a == nil {
+			continue
+		}
+		scan := &ScanStatus{}
+		for _, rep := range a.ScanOverview {
+			scan.ID = rep.ReportID
+			scan.Status = rep.ScanStatus
+			scan.StartTime = time.Time(rep.StartTime)
+			scan.EndTime = time.Time(rep.EndTime)
+			if rep.Summary != nil {
+				scan.CriticalCount = rep.Summary.Summary["Critical"]
+				scan.HighCount = rep.Summary.Summary["High"]
+				scan.MediumCount = rep.Summary.Summary["Medium"]
+				scan.LowCount = rep.Summary.Summary["Low"]
+			}
+			break
+		}
+		out = append(out, scan)
+	}
+	return out, nil
 }
 
-// GetScan retrieves a specific scan result
+// GetScan retrieves the scan result for an artifact by fetching the artifact
+// with its scan_overview and extracting the first available NativeReportSummary.
+// Returns (nil, nil) when the artifact itself does not exist (404). When no
+// scan has been triggered yet, the scan_overview map is empty and the returned
+// ScanStatus has Status="" (not-started).
+//
+// Caveat: Harbor's scan_overview is keyed by MIME type
+// (e.g. "application/vnd.security.vulnerability.report; version=1.1"); we pick
+// the first entry. Severity-level counts (Critical/High/Medium/Low) are stored
+// in NativeReportSummary.Summary as a string->int64 map, not fixed fields.
 func (c *HarborClient) GetScan(ctx context.Context, projectID, repoName, reference string) (*ScanStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1624,21 +1898,40 @@ func (c *HarborClient) GetScan(ctx context.Context, projectID, repoName, referen
 
 	c.logger.Info("Retrieving Harbor scan", "projectId", projectID, "repo", repoName, "reference", reference)
 
-	scan := &ScanStatus{
-		ID:            "1",
-		Status:        "completed",
-		CriticalCount: 0,
-		HighCount:     1,
-		MediumCount:   3,
-		LowCount:      5,
-		StartTime:     time.Now().Add(-1 * time.Hour),
-		EndTime:       time.Now(),
+	withScan := true
+	params := harborartifact.NewGetArtifactParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithReference(reference).
+		WithWithScanOverview(&withScan)
+	resp, err := v2Client.Artifact.GetArtifact(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor artifact for scan status")
 	}
 
+	scan := &ScanStatus{}
+	// Pick the first scan report from the overview map (keyed by MIME type).
+	for _, rep := range resp.Payload.ScanOverview {
+		scan.ID = rep.ReportID
+		scan.Status = rep.ScanStatus
+		scan.StartTime = time.Time(rep.StartTime)
+		scan.EndTime = time.Time(rep.EndTime)
+		if rep.Summary != nil {
+			scan.CriticalCount = rep.Summary.Summary["Critical"]
+			scan.HighCount = rep.Summary.Summary["High"]
+			scan.MediumCount = rep.Summary.Summary["Medium"]
+			scan.LowCount = rep.Summary.Summary["Low"]
+		}
+		break
+	}
 	return scan, nil
 }
 
-// StopScan stops a running scan
+// StopScan stops a running vulnerability scan on an artifact.
+// 404 (artifact or scan not found) is treated as success (idempotent).
 func (c *HarborClient) StopScan(ctx context.Context, projectID, repoName, reference string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
@@ -1657,6 +1950,16 @@ func (c *HarborClient) StopScan(ctx context.Context, projectID, repoName, refere
 
 	c.logger.Info("Stopping Harbor artifact scan", "projectId", projectID, "repo", repoName, "reference", reference)
 
+	params := harborscan.NewStopScanArtifactParams().WithContext(ctx).
+		WithProjectName(projectID).
+		WithRepositoryName(repoName).
+		WithReference(reference)
+	if _, err := v2Client.Scan.StopScanArtifact(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot stop Harbor artifact scan")
+	}
 	return nil
 }
 
@@ -1933,6 +2236,7 @@ type WebhookSpec struct {
 	EventTypes     []string
 	AuthHeader     *string
 	SkipCertVerify bool
+	Enabled        *bool
 }
 
 // WebhookStatus represents the status of a Harbor webhook
@@ -1947,7 +2251,74 @@ type WebhookStatus struct {
 	UpdateTime   time.Time
 }
 
-// CreateWebhook creates a new webhook
+// webhookPolicyToStatus converts a Harbor WebhookPolicy model to our WebhookStatus.
+func webhookPolicyToStatus(projectID string, p *harbormodels.WebhookPolicy) *WebhookStatus {
+	if p == nil {
+		return nil
+	}
+	st := &WebhookStatus{
+		ID:           strconv.FormatInt(p.ID, 10),
+		ProjectID:    projectID,
+		Name:         p.Name,
+		EventTypes:   p.EventTypes,
+		CreationTime: time.Time(p.CreationTime),
+		UpdateTime:   time.Time(p.UpdateTime),
+	}
+	if p.Description != "" {
+		st.Description = ptr.To(p.Description)
+	}
+	// Collect target URL from first target (Harbor supports one target per policy).
+	if len(p.Targets) > 0 && p.Targets[0] != nil {
+		st.URL = p.Targets[0].Address
+	}
+	return st
+}
+
+// webhookPolicyReq builds a WebhookPolicy request body from our WebhookSpec.
+func webhookPolicyReq(spec *WebhookSpec) *harbormodels.WebhookPolicy {
+	enabled := true
+	if spec.Enabled != nil {
+		enabled = *spec.Enabled
+	}
+	target := &harbormodels.WebhookTargetObject{
+		Type:           "http",
+		Address:        spec.URL,
+		SkipCertVerify: spec.SkipCertVerify,
+	}
+	if spec.AuthHeader != nil {
+		target.AuthHeader = *spec.AuthHeader
+	}
+	desc := ""
+	if spec.Description != nil {
+		desc = *spec.Description
+	}
+	return &harbormodels.WebhookPolicy{
+		Name:        spec.Name,
+		Description: desc,
+		Enabled:     enabled,
+		EventTypes:  spec.EventTypes,
+		Targets:     []*harbormodels.WebhookTargetObject{target},
+	}
+}
+
+// findWebhookByName lists webhook policies for the project and returns the one
+// whose name matches. Returns (nil, nil) when not found.
+func (c *HarborClient) findWebhookByName(ctx context.Context, projectID, name string) (*WebhookStatus, error) {
+	policies, err := c.ListWebhooks(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range policies {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateWebhook creates a new webhook policy in the given project. Harbor's
+// Create response carries no policy ID, so we re-read via list+match to
+// capture the authoritative numeric ID.
 func (c *HarborClient) CreateWebhook(ctx context.Context, spec *WebhookSpec) (*WebhookStatus, error) {
 	if spec == nil {
 		return nil, errors.New("spec is required")
@@ -1969,21 +2340,29 @@ func (c *HarborClient) CreateWebhook(ctx context.Context, spec *WebhookSpec) (*W
 
 	c.logger.Info("Creating Harbor webhook", "projectId", spec.ProjectID, "name", spec.Name, "url", spec.URL)
 
-	webhook := &WebhookStatus{
-		ID:           "1",
-		ProjectID:    spec.ProjectID,
-		Name:         spec.Name,
-		Description:  spec.Description,
-		URL:          spec.URL,
-		EventTypes:   spec.EventTypes,
-		CreationTime: time.Now(),
-		UpdateTime:   time.Now(),
+	ref, isName := projectRef(spec.ProjectID)
+	params := harborwebhook.NewCreateWebhookPolicyOfProjectParams().
+		WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithPolicy(webhookPolicyReq(spec))
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Webhook.CreateWebhookPolicyOfProject(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor webhook policy")
 	}
 
-	return webhook, nil
+	st, err := c.findWebhookByName(ctx, spec.ProjectID, spec.Name)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor webhook created but not yet observable")
+	}
+	return st, nil
 }
 
-// ListWebhooks lists webhooks for a project
+// ListWebhooks lists webhook policies for a project.
 func (c *HarborClient) ListWebhooks(ctx context.Context, projectID string) ([]*WebhookStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -1996,27 +2375,43 @@ func (c *HarborClient) ListWebhooks(ctx context.Context, projectID string) ([]*W
 
 	c.logger.Info("Listing Harbor webhooks", "projectId", projectID)
 
-	webhooks := []*WebhookStatus{
-		{
-			ID:           "1",
-			ProjectID:    projectID,
-			Name:         "push-notifier",
-			URL:          "https://example.com/webhook",
-			CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-			UpdateTime:   time.Now(),
-		},
+	ref, isName := projectRef(projectID)
+	params := harborwebhook.NewListWebhookPoliciesOfProjectParams().
+		WithContext(ctx).
+		WithProjectNameOrID(ref)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	resp, err := v2Client.Webhook.ListWebhookPoliciesOfProject(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot list Harbor webhook policies")
 	}
 
-	return webhooks, nil
+	out := make([]*WebhookStatus, 0, len(resp.Payload))
+	for _, p := range resp.Payload {
+		if p != nil {
+			out = append(out, webhookPolicyToStatus(projectID, p))
+		}
+	}
+	return out, nil
 }
 
-// GetWebhook retrieves a specific webhook
+// GetWebhook retrieves a webhook policy by its numeric ID. Returns (nil, nil)
+// when the policy does not exist.
 func (c *HarborClient) GetWebhook(ctx context.Context, projectID, webhookID string) (*WebhookStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
 	}
 	if webhookID == "" {
 		return nil, errors.New("webhook ID is required")
+	}
+
+	id, err := strconv.ParseInt(webhookID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid webhook policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2026,19 +2421,26 @@ func (c *HarborClient) GetWebhook(ctx context.Context, projectID, webhookID stri
 
 	c.logger.Info("Retrieving Harbor webhook", "projectId", projectID, "webhookId", webhookID)
 
-	webhook := &WebhookStatus{
-		ID:           webhookID,
-		ProjectID:    projectID,
-		Name:         "push-notifier",
-		URL:          "https://example.com/webhook",
-		CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
+	ref, isName := projectRef(projectID)
+	params := harborwebhook.NewGetWebhookPolicyOfProjectParams().
+		WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithWebhookPolicyID(id)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	resp, err := v2Client.Webhook.GetWebhookPolicyOfProject(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor webhook policy")
 	}
 
-	return webhook, nil
+	return webhookPolicyToStatus(projectID, resp.Payload), nil
 }
 
-// UpdateWebhook updates a webhook
+// UpdateWebhook updates a webhook policy by its numeric ID.
 func (c *HarborClient) UpdateWebhook(ctx context.Context, projectID, webhookID string, spec *WebhookSpec) (*WebhookStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -2050,6 +2452,11 @@ func (c *HarborClient) UpdateWebhook(ctx context.Context, projectID, webhookID s
 		return nil, errors.New("spec is required")
 	}
 
+	id, err := strconv.ParseInt(webhookID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid webhook policy ID")
+	}
+
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
 		return nil, errors.New("failed to get Harbor v2 client")
@@ -2057,27 +2464,34 @@ func (c *HarborClient) UpdateWebhook(ctx context.Context, projectID, webhookID s
 
 	c.logger.Info("Updating Harbor webhook", "projectId", projectID, "webhookId", webhookID, "name", spec.Name)
 
-	webhook := &WebhookStatus{
-		ID:           webhookID,
-		ProjectID:    projectID,
-		Name:         spec.Name,
-		Description:  spec.Description,
-		URL:          spec.URL,
-		EventTypes:   spec.EventTypes,
-		CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
+	ref, isName := projectRef(projectID)
+	params := harborwebhook.NewUpdateWebhookPolicyOfProjectParams().
+		WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithWebhookPolicyID(id).
+		WithPolicy(webhookPolicyReq(spec))
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Webhook.UpdateWebhookPolicyOfProject(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor webhook policy")
 	}
 
-	return webhook, nil
+	return c.GetWebhook(ctx, projectID, webhookID)
 }
 
-// DeleteWebhook deletes a webhook
+// DeleteWebhook deletes a webhook policy (idempotent on 404).
 func (c *HarborClient) DeleteWebhook(ctx context.Context, projectID, webhookID string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
 	}
 	if webhookID == "" {
 		return errors.New("webhook ID is required")
+	}
+
+	id, err := strconv.ParseInt(webhookID, 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "invalid webhook policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2087,6 +2501,20 @@ func (c *HarborClient) DeleteWebhook(ctx context.Context, projectID, webhookID s
 
 	c.logger.Info("Deleting Harbor webhook", "projectId", projectID, "webhookId", webhookID)
 
+	ref, isName := projectRef(projectID)
+	params := harborwebhook.NewDeleteWebhookPolicyOfProjectParams().
+		WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithWebhookPolicyID(id)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Webhook.DeleteWebhookPolicyOfProject(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor webhook policy")
+	}
 	return nil
 }
 
@@ -2137,7 +2565,100 @@ type ReplicationExecution struct {
 	FailedCount  int64
 }
 
-// CreateReplicationPolicy creates a new replication policy
+// replicationPolicyModel converts a ReplicationPolicySpec to the Harbor SDK
+// ReplicationPolicy model used for create and update calls.
+// Caveats:
+//   - DestinationReg carries name+URL from the CR. Harbor's replication API
+//     accepts a Registry object on the body; Harbor matches by registry ID on the
+//     server. We pass name+URL and rely on Harbor to resolve the internal ID.
+//   - SourceRegistry is intentionally left nil (local) because the CR stores only
+//     a human-readable name. Resolving it would require an extra list+match call.
+//   - DeleteSourceTag maps to ReplicateDeletion (the non-deprecated field).
+func replicationPolicyModel(spec *ReplicationPolicySpec) *harbormodels.ReplicationPolicy {
+	p := &harbormodels.ReplicationPolicy{
+		Name:     spec.Name,
+		Enabled:  spec.Enabled != nil && *spec.Enabled,
+		Override: spec.Override != nil && *spec.Override,
+	}
+	if spec.Description != nil {
+		p.Description = *spec.Description
+	}
+	if spec.DeleteSourceTag != nil {
+		p.ReplicateDeletion = *spec.DeleteSourceTag
+	}
+	if spec.Trigger != "" {
+		p.Trigger = &harbormodels.ReplicationTrigger{Type: spec.Trigger}
+	}
+	if spec.DestinationReg != nil {
+		p.DestRegistry = &harbormodels.Registry{
+			Name: spec.DestinationReg.Name,
+			URL:  spec.DestinationReg.URL,
+		}
+		p.DestNamespace = spec.DestinationReg.Namespace
+	}
+	if len(spec.Filters) > 0 {
+		p.Filters = make([]*harbormodels.ReplicationFilter, len(spec.Filters))
+		for i, f := range spec.Filters {
+			p.Filters[i] = &harbormodels.ReplicationFilter{Type: f.Type, Value: f.Value}
+		}
+	}
+	return p
+}
+
+// replicationPolicyStatusFromModel converts a Harbor SDK ReplicationPolicy to our
+// internal ReplicationPolicyStatus.
+func replicationPolicyStatusFromModel(p *harbormodels.ReplicationPolicy) *ReplicationPolicyStatus {
+	if p == nil {
+		return &ReplicationPolicyStatus{}
+	}
+	st := &ReplicationPolicyStatus{
+		ID:      strconv.FormatInt(p.ID, 10),
+		Name:    p.Name,
+		Enabled: p.Enabled,
+	}
+	if p.Description != "" {
+		st.Description = ptr.To(p.Description)
+	}
+	if t := time.Time(p.CreationTime); !t.IsZero() {
+		st.CreationTime = t
+	}
+	if t := time.Time(p.UpdateTime); !t.IsZero() {
+		st.UpdateTime = t
+	}
+	return st
+}
+
+// idFromLocation extracts the trailing numeric ID from a Harbor Location header
+// (e.g. "/api/v2.0/replication/policies/42" -> 42).
+func idFromLocation(location string) (int64, error) {
+	parts := strings.Split(strings.TrimRight(location, "/"), "/")
+	if len(parts) == 0 {
+		return 0, errors.New("empty location")
+	}
+	return strconv.ParseInt(parts[len(parts)-1], 10, 64)
+}
+
+// getReplicationPolicyByID fetches a replication policy by its numeric Harbor ID.
+// Returns (nil, nil) on 404.
+func (c *HarborClient) getReplicationPolicyByID(ctx context.Context, id int64) (*ReplicationPolicyStatus, error) {
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+
+	params := harborreplication.NewGetReplicationPolicyParams().WithContext(ctx).WithID(id)
+	resp, err := v2Client.Replication.GetReplicationPolicy(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor replication policy")
+	}
+	return replicationPolicyStatusFromModel(resp.Payload), nil
+}
+
+// CreateReplicationPolicy creates a new replication policy using the Harbor SDK.
+// The created policy is re-read via the Location header to capture the real numeric ID.
 func (c *HarborClient) CreateReplicationPolicy(ctx context.Context, spec *ReplicationPolicySpec) (*ReplicationPolicyStatus, error) {
 	if spec == nil {
 		return nil, errors.New("spec is required")
@@ -2159,19 +2680,29 @@ func (c *HarborClient) CreateReplicationPolicy(ctx context.Context, spec *Replic
 		"destination", spec.DestinationReg.Name,
 		"trigger", spec.Trigger)
 
-	policy := &ReplicationPolicyStatus{
-		ID:           "1",
-		Name:         spec.Name,
-		Description:  spec.Description,
-		Enabled:      spec.Enabled != nil && *spec.Enabled,
-		CreationTime: time.Now(),
-		UpdateTime:   time.Now(),
+	params := harborreplication.NewCreateReplicationPolicyParams().
+		WithContext(ctx).
+		WithPolicy(replicationPolicyModel(spec))
+	resp, err := v2Client.Replication.CreateReplicationPolicy(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor replication policy")
 	}
 
-	return policy, nil
+	id, err := idFromLocation(resp.Location)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot parse replication policy ID from location header")
+	}
+	st, err := c.getReplicationPolicyByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("replication policy created but not yet observable")
+	}
+	return st, nil
 }
 
-// ListReplicationPolicies lists all replication policies
+// ListReplicationPolicies lists all replication policies using the Harbor SDK.
 func (c *HarborClient) ListReplicationPolicies(ctx context.Context) ([]*ReplicationPolicyStatus, error) {
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
@@ -2180,50 +2711,48 @@ func (c *HarborClient) ListReplicationPolicies(ctx context.Context) ([]*Replicat
 
 	c.logger.Info("Listing Harbor replication policies")
 
-	policies := []*ReplicationPolicyStatus{
-		{
-			ID:           "1",
-			Name:         "mirror-to-registry",
-			Enabled:      true,
-			CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-			UpdateTime:   time.Now(),
-		},
+	params := harborreplication.NewListReplicationPoliciesParams().WithContext(ctx)
+	resp, err := v2Client.Replication.ListReplicationPolicies(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor replication policies")
 	}
 
-	return policies, nil
+	out := make([]*ReplicationPolicyStatus, 0, len(resp.Payload))
+	for _, p := range resp.Payload {
+		if p != nil {
+			out = append(out, replicationPolicyStatusFromModel(p))
+		}
+	}
+	return out, nil
 }
 
-// GetReplicationPolicy retrieves a specific replication policy
+// GetReplicationPolicy retrieves a replication policy by numeric ID string.
+// Returns (nil, nil) on 404.
 func (c *HarborClient) GetReplicationPolicy(ctx context.Context, policyID string) (*ReplicationPolicyStatus, error) {
 	if policyID == "" {
 		return nil, errors.New("policy ID is required")
 	}
 
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid replication policy ID")
 	}
-
-	c.logger.Info("Retrieving Harbor replication policy", "policyId", policyID)
-
-	policy := &ReplicationPolicyStatus{
-		ID:           policyID,
-		Name:         "mirror-to-registry",
-		Enabled:      true,
-		CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
-	}
-
-	return policy, nil
+	return c.getReplicationPolicyByID(ctx, id)
 }
 
-// UpdateReplicationPolicy updates a replication policy
+// UpdateReplicationPolicy updates an existing replication policy. Re-reads and
+// returns the updated observed state.
 func (c *HarborClient) UpdateReplicationPolicy(ctx context.Context, policyID string, spec *ReplicationPolicySpec) (*ReplicationPolicyStatus, error) {
 	if policyID == "" {
 		return nil, errors.New("policy ID is required")
 	}
 	if spec == nil {
 		return nil, errors.New("spec is required")
+	}
+
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid replication policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2233,22 +2762,28 @@ func (c *HarborClient) UpdateReplicationPolicy(ctx context.Context, policyID str
 
 	c.logger.Info("Updating Harbor replication policy", "policyId", policyID, "name", spec.Name)
 
-	policy := &ReplicationPolicyStatus{
-		ID:           policyID,
-		Name:         spec.Name,
-		Description:  spec.Description,
-		Enabled:      spec.Enabled != nil && *spec.Enabled,
-		CreationTime: time.Now().Add(-7 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
+	model := replicationPolicyModel(spec)
+	model.ID = id
+	params := harborreplication.NewUpdateReplicationPolicyParams().
+		WithContext(ctx).
+		WithID(id).
+		WithPolicy(model)
+	if _, err := v2Client.Replication.UpdateReplicationPolicy(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor replication policy")
 	}
 
-	return policy, nil
+	return c.getReplicationPolicyByID(ctx, id)
 }
 
-// DeleteReplicationPolicy deletes a replication policy
+// DeleteReplicationPolicy deletes a replication policy. Idempotent: 404 is success.
 func (c *HarborClient) DeleteReplicationPolicy(ctx context.Context, policyID string) error {
 	if policyID == "" {
 		return errors.New("policy ID is required")
+	}
+
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "invalid replication policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2258,13 +2793,25 @@ func (c *HarborClient) DeleteReplicationPolicy(ctx context.Context, policyID str
 
 	c.logger.Info("Deleting Harbor replication policy", "policyId", policyID)
 
+	params := harborreplication.NewDeleteReplicationPolicyParams().WithContext(ctx).WithID(id)
+	if _, err := v2Client.Replication.DeleteReplicationPolicy(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor replication policy")
+	}
 	return nil
 }
 
-// TriggerReplication triggers a manual replication
+// TriggerReplication triggers a manual replication for the given policy.
 func (c *HarborClient) TriggerReplication(ctx context.Context, policyID string) (*ReplicationExecution, error) {
 	if policyID == "" {
 		return nil, errors.New("policy ID is required")
+	}
+
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid replication policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2274,20 +2821,32 @@ func (c *HarborClient) TriggerReplication(ctx context.Context, policyID string) 
 
 	c.logger.Info("Triggering Harbor replication", "policyId", policyID)
 
-	execution := &ReplicationExecution{
-		ID:        "1",
+	params := harborreplication.NewStartReplicationParams().
+		WithContext(ctx).
+		WithExecution(&harbormodels.StartReplicationExecution{PolicyID: id})
+	resp, err := v2Client.Replication.StartReplication(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot trigger Harbor replication")
+	}
+
+	execID, _ := idFromLocation(resp.Location)
+	return &ReplicationExecution{
+		ID:        strconv.FormatInt(execID, 10),
 		PolicyID:  policyID,
 		Status:    "pending",
 		StartTime: time.Now(),
-	}
-
-	return execution, nil
+	}, nil
 }
 
-// ListReplicationExecutions lists replication execution history
+// ListReplicationExecutions lists replication executions for a policy.
 func (c *HarborClient) ListReplicationExecutions(ctx context.Context, policyID string) ([]*ReplicationExecution, error) {
 	if policyID == "" {
 		return nil, errors.New("policy ID is required")
+	}
+
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid replication policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2297,19 +2856,29 @@ func (c *HarborClient) ListReplicationExecutions(ctx context.Context, policyID s
 
 	c.logger.Info("Listing Harbor replication executions", "policyId", policyID)
 
-	executions := []*ReplicationExecution{
-		{
-			ID:           "1",
-			PolicyID:     policyID,
-			Status:       "completed",
-			StartTime:    time.Now().Add(-1 * time.Hour),
-			EndTime:      time.Now(),
-			SuccessCount: 42,
-			FailedCount:  0,
-		},
+	params := harborreplication.NewListReplicationExecutionsParams().WithContext(ctx).WithPolicyID(&id)
+	resp, err := v2Client.Replication.ListReplicationExecutions(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor replication executions")
 	}
 
-	return executions, nil
+	out := make([]*ReplicationExecution, 0, len(resp.Payload))
+	for _, e := range resp.Payload {
+		if e == nil {
+			continue
+		}
+		ex := &ReplicationExecution{
+			ID:           strconv.FormatInt(e.ID, 10),
+			PolicyID:     policyID,
+			Status:       e.Status,
+			StartTime:    time.Time(e.StartTime),
+			EndTime:      time.Time(e.EndTime),
+			SuccessCount: int64(e.Succeed),
+			FailedCount:  int64(e.Failed),
+		}
+		out = append(out, ex)
+	}
+	return out, nil
 }
 
 // RetentionPolicyRule defines a retention rule
@@ -2338,7 +2907,90 @@ type RetentionPolicyStatus struct {
 	UpdateTime   time.Time
 }
 
-// CreateRetentionPolicy creates a new retention policy
+// retentionPolicyModel converts a RetentionPolicySpec to the Harbor SDK RetentionPolicy.
+// Harbor retention policies are scoped to a project via scope.ref = numeric project ID.
+// Rule mapping:
+//   - RuleType maps to Template (Harbor algorithm name e.g. latestPushedK).
+//   - TagSelectors map to TagSelectors as RetentionSelector with Decoration="matches".
+//   - Parameters map to rule Params.
+//
+// Trigger: "manual" -> Kind="Schedule" with no settings; "scheduled" -> same (cron configurable).
+// Harbor's RetentionPolicy model has no Description, Enabled, or timestamp fields.
+func retentionPolicyModel(spec *RetentionPolicySpec) (*harbormodels.RetentionPolicy, error) {
+	projectIDInt, err := strconv.ParseInt(spec.ProjectID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid project ID for retention policy")
+	}
+
+	rules := make([]*harbormodels.RetentionRule, 0, len(spec.Rules))
+	for _, r := range spec.Rules {
+		rule := &harbormodels.RetentionRule{
+			Template: r.RuleType,
+			Action:   "retain",
+		}
+		if len(r.TagSelectors) > 0 {
+			rule.TagSelectors = make([]*harbormodels.RetentionSelector, len(r.TagSelectors))
+			for i, ts := range r.TagSelectors {
+				rule.TagSelectors[i] = &harbormodels.RetentionSelector{
+					Kind:       "doublestar",
+					Decoration: "matches",
+					Pattern:    ts,
+				}
+			}
+		}
+		if len(r.Parameters) > 0 {
+			rule.Params = r.Parameters
+		}
+		rules = append(rules, rule)
+	}
+
+	p := &harbormodels.RetentionPolicy{
+		Algorithm: "or",
+		Rules:     rules,
+		Scope: &harbormodels.RetentionPolicyScope{
+			Level: "project",
+			Ref:   projectIDInt,
+		},
+		Trigger: &harbormodels.RetentionRuleTrigger{Kind: "Schedule"},
+	}
+	return p, nil
+}
+
+// retentionPolicyStatusFromModel converts a Harbor SDK RetentionPolicy to our
+// internal RetentionPolicyStatus.
+// Caveat: Harbor's RetentionPolicy model has no Description, Enabled, CreationTime,
+// or UpdateTime — these are synthesised from spec/reconcile context by the caller.
+func retentionPolicyStatusFromModel(projectID string, p *harbormodels.RetentionPolicy) *RetentionPolicyStatus {
+	if p == nil {
+		return &RetentionPolicyStatus{ProjectID: projectID}
+	}
+	return &RetentionPolicyStatus{
+		ID:        strconv.FormatInt(p.ID, 10),
+		ProjectID: projectID,
+	}
+}
+
+// getRetentionPolicyByID fetches a retention policy by its numeric Harbor ID.
+// Returns (nil, nil) on 404.
+func (c *HarborClient) getRetentionPolicyByID(ctx context.Context, projectID string, id int64) (*RetentionPolicyStatus, error) {
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return nil, errors.New("failed to get Harbor v2 client")
+	}
+
+	params := harborretention.NewGetRetentionParams().WithContext(ctx).WithID(id)
+	resp, err := v2Client.Retention.GetRetention(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor retention policy")
+	}
+	return retentionPolicyStatusFromModel(projectID, resp.Payload), nil
+}
+
+// CreateRetentionPolicy creates a new retention policy using the Harbor SDK.
+// Re-reads via the Location header to capture the authoritative numeric ID.
 func (c *HarborClient) CreateRetentionPolicy(ctx context.Context, spec *RetentionPolicySpec) (*RetentionPolicyStatus, error) {
 	if spec == nil {
 		return nil, errors.New("spec is required")
@@ -2359,19 +3011,38 @@ func (c *HarborClient) CreateRetentionPolicy(ctx context.Context, spec *Retentio
 		"projectId", spec.ProjectID,
 		"rulesCount", len(spec.Rules))
 
-	policy := &RetentionPolicyStatus{
-		ID:           "1",
-		ProjectID:    spec.ProjectID,
-		Description:  spec.Description,
-		Enabled:      spec.Enabled != nil && *spec.Enabled,
-		CreationTime: time.Now(),
-		UpdateTime:   time.Now(),
+	model, err := retentionPolicyModel(spec)
+	if err != nil {
+		return nil, err
 	}
 
-	return policy, nil
+	params := harborretention.NewCreateRetentionParams().WithContext(ctx).WithPolicy(model)
+	resp, err := v2Client.Retention.CreateRetention(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor retention policy")
+	}
+
+	id, err := idFromLocation(resp.Location)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot parse retention policy ID from location header")
+	}
+	st, err := c.getRetentionPolicyByID(ctx, spec.ProjectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("retention policy created but not yet observable")
+	}
+	if spec.Enabled != nil {
+		st.Enabled = *spec.Enabled
+	}
+	st.Description = spec.Description
+	return st, nil
 }
 
-// ListRetentionPolicies lists retention policies for a project
+// ListRetentionPolicies returns the retention policy bound to a project, if any.
+// Harbor allows at most one retention policy per project; the binding is stored
+// as "retention_id" in project metadata. Returns empty slice when none is bound.
 func (c *HarborClient) ListRetentionPolicies(ctx context.Context, projectID string) ([]*RetentionPolicyStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -2384,20 +3055,44 @@ func (c *HarborClient) ListRetentionPolicies(ctx context.Context, projectID stri
 
 	c.logger.Info("Listing Harbor retention policies", "projectId", projectID)
 
-	policies := []*RetentionPolicyStatus{
-		{
-			ID:           "1",
-			ProjectID:    projectID,
-			Enabled:      true,
-			CreationTime: time.Now().Add(-30 * 24 * time.Hour),
-			UpdateTime:   time.Now(),
-		},
+	ref, isName := projectRef(projectID)
+	projParams := harborproject.NewGetProjectParams().WithContext(ctx).WithProjectNameOrID(ref)
+	if isName != nil {
+		projParams = projParams.WithXIsResourceName(isName)
+	}
+	projResp, err := v2Client.Project.GetProject(ctx, projParams)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get project for retention lookup")
 	}
 
-	return policies, nil
+	if projResp.Payload == nil || projResp.Payload.Metadata == nil {
+		return nil, nil
+	}
+	retentionIDStr := ptr.Deref(projResp.Payload.Metadata.RetentionID, "")
+	if retentionIDStr == "" {
+		return nil, nil
+	}
+
+	retentionID, err := strconv.ParseInt(retentionIDStr, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot parse retention policy ID from project metadata")
+	}
+
+	st, err := c.getRetentionPolicyByID(ctx, projectID, retentionID)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, nil
+	}
+	return []*RetentionPolicyStatus{st}, nil
 }
 
-// GetRetentionPolicy retrieves a specific retention policy
+// GetRetentionPolicy retrieves a retention policy by numeric ID string.
+// Returns (nil, nil) on 404.
 func (c *HarborClient) GetRetentionPolicy(ctx context.Context, projectID, policyID string) (*RetentionPolicyStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -2406,25 +3101,15 @@ func (c *HarborClient) GetRetentionPolicy(ctx context.Context, projectID, policy
 		return nil, errors.New("policy ID is required")
 	}
 
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid retention policy ID")
 	}
-
-	c.logger.Info("Retrieving Harbor retention policy", "projectId", projectID, "policyId", policyID)
-
-	policy := &RetentionPolicyStatus{
-		ID:           policyID,
-		ProjectID:    projectID,
-		Enabled:      true,
-		CreationTime: time.Now().Add(-30 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
-	}
-
-	return policy, nil
+	return c.getRetentionPolicyByID(ctx, projectID, id)
 }
 
-// UpdateRetentionPolicy updates a retention policy
+// UpdateRetentionPolicy updates an existing retention policy. Re-reads and
+// returns the updated state.
 func (c *HarborClient) UpdateRetentionPolicy(ctx context.Context, projectID, policyID string, spec *RetentionPolicySpec) (*RetentionPolicyStatus, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -2436,6 +3121,11 @@ func (c *HarborClient) UpdateRetentionPolicy(ctx context.Context, projectID, pol
 		return nil, errors.New("spec is required")
 	}
 
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid retention policy ID")
+	}
+
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
 		return nil, errors.New("failed to get Harbor v2 client")
@@ -2443,25 +3133,42 @@ func (c *HarborClient) UpdateRetentionPolicy(ctx context.Context, projectID, pol
 
 	c.logger.Info("Updating Harbor retention policy", "projectId", projectID, "policyId", policyID)
 
-	policy := &RetentionPolicyStatus{
-		ID:           policyID,
-		ProjectID:    projectID,
-		Description:  spec.Description,
-		Enabled:      spec.Enabled != nil && *spec.Enabled,
-		CreationTime: time.Now().Add(-30 * 24 * time.Hour),
-		UpdateTime:   time.Now(),
+	model, err := retentionPolicyModel(spec)
+	if err != nil {
+		return nil, err
+	}
+	model.ID = id
+
+	params := harborretention.NewUpdateRetentionParams().WithContext(ctx).WithID(id).WithPolicy(model)
+	if _, err := v2Client.Retention.UpdateRetention(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor retention policy")
 	}
 
-	return policy, nil
+	st, err := c.getRetentionPolicyByID(ctx, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if st != nil {
+		if spec.Enabled != nil {
+			st.Enabled = *spec.Enabled
+		}
+		st.Description = spec.Description
+	}
+	return st, nil
 }
 
-// DeleteRetentionPolicy deletes a retention policy
+// DeleteRetentionPolicy deletes a retention policy. Idempotent: 404 is success.
 func (c *HarborClient) DeleteRetentionPolicy(ctx context.Context, projectID, policyID string) error {
 	if projectID == "" {
 		return errors.New("project ID is required")
 	}
 	if policyID == "" {
 		return errors.New("policy ID is required")
+	}
+
+	id, err := strconv.ParseInt(policyID, 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "invalid retention policy ID")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -2471,10 +3178,32 @@ func (c *HarborClient) DeleteRetentionPolicy(ctx context.Context, projectID, pol
 
 	c.logger.Info("Deleting Harbor retention policy", "projectId", projectID, "policyId", policyID)
 
+	params := harborretention.NewDeleteRetentionParams().WithContext(ctx).WithID(id)
+	if _, err := v2Client.Retention.DeleteRetention(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor retention policy")
+	}
 	return nil
 }
 
-// CreateUserGroup creates a new user group in Harbor
+// userGroupStatusFromModel converts a Harbor API UserGroup model to our UserGroupStatus.
+func userGroupStatusFromModel(g *harbormodels.UserGroup) *UserGroupStatus {
+	if g == nil {
+		return nil
+	}
+	return &UserGroupStatus{
+		ID:          g.ID,
+		GroupName:   g.GroupName,
+		GroupType:   g.GroupType,
+		LdapGroupDn: g.LdapGroupDn,
+	}
+}
+
+// CreateUserGroup creates a new user group in Harbor.
+// Harbor returns only a Location header on 201; we parse the ID from that URL
+// and re-read to return the authoritative observed state.
 func (c *HarborClient) CreateUserGroup(ctx context.Context, spec *UserGroupSpec) (*UserGroupStatus, error) {
 	if spec == nil {
 		return nil, errors.New("user group spec is required")
@@ -2490,16 +3219,46 @@ func (c *HarborClient) CreateUserGroup(ctx context.Context, spec *UserGroupSpec)
 
 	c.logger.Info("Creating Harbor user group", "groupName", spec.GroupName, "groupType", spec.GroupType)
 
-	// TODO: Implement actual Harbor API call
-	return &UserGroupStatus{
-		ID:          1,
+	ldapDn := ""
+	if spec.LdapGroupDn != nil {
+		ldapDn = *spec.LdapGroupDn
+	}
+	req := &harbormodels.UserGroup{
 		GroupName:   spec.GroupName,
 		GroupType:   spec.GroupType,
-		LdapGroupDn: *spec.LdapGroupDn,
-	}, nil
+		LdapGroupDn: ldapDn,
+	}
+	params := harborusergroup.NewCreateUserGroupParams().WithContext(ctx).WithUsergroup(req)
+	resp, err := v2Client.Usergroup.CreateUserGroup(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot create Harbor user group")
+	}
+
+	// Parse the numeric group ID from the Location header
+	// (e.g. /api/v2.0/usergroups/42).
+	loc := resp.Location
+	lastSlash := strings.LastIndex(loc, "/")
+	if lastSlash < 0 || lastSlash == len(loc)-1 {
+		return nil, errors.Errorf("unexpected Location header from Harbor: %q", loc)
+	}
+	idStr := loc[lastSlash+1:]
+	gid, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return nil, errors.Wrapf(err, "cannot parse group ID from Location %q", loc)
+	}
+
+	// Re-read to capture authoritative state.
+	st, err := c.GetUserGroup(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, errors.New("Harbor user group created but not yet observable")
+	}
+	return st, nil
 }
 
-// ListUserGroups lists all user groups in Harbor
+// ListUserGroups lists all user groups in Harbor.
 func (c *HarborClient) ListUserGroups(ctx context.Context) ([]*UserGroupStatus, error) {
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
@@ -2508,11 +3267,23 @@ func (c *HarborClient) ListUserGroups(ctx context.Context) ([]*UserGroupStatus, 
 
 	c.logger.Info("Listing Harbor user groups")
 
-	// TODO: Implement actual Harbor API call
-	return []*UserGroupStatus{}, nil
+	params := harborusergroup.NewListUserGroupsParams().WithContext(ctx)
+	resp, err := v2Client.Usergroup.ListUserGroups(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list Harbor user groups")
+	}
+
+	out := make([]*UserGroupStatus, 0, len(resp.Payload))
+	for _, g := range resp.Payload {
+		if g != nil {
+			out = append(out, userGroupStatusFromModel(g))
+		}
+	}
+	return out, nil
 }
 
-// GetUserGroup retrieves a specific user group from Harbor
+// GetUserGroup retrieves a specific user group from Harbor by numeric ID.
+// Returns (nil, nil) when the group does not exist (404).
 func (c *HarborClient) GetUserGroup(ctx context.Context, groupID int64) (*UserGroupStatus, error) {
 	if groupID <= 0 {
 		return nil, errors.New("group ID is required")
@@ -2525,11 +3296,18 @@ func (c *HarborClient) GetUserGroup(ctx context.Context, groupID int64) (*UserGr
 
 	c.logger.Info("Getting Harbor user group", "groupId", groupID)
 
-	// TODO: Implement actual Harbor API call
-	return nil, nil
+	params := harborusergroup.NewGetUserGroupParams().WithContext(ctx).WithGroupID(groupID)
+	resp, err := v2Client.Usergroup.GetUserGroup(ctx, params)
+	if err != nil {
+		if isHarborNotFound(err) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "cannot get Harbor user group")
+	}
+	return userGroupStatusFromModel(resp.Payload), nil
 }
 
-// UpdateUserGroup updates a user group in Harbor
+// UpdateUserGroup updates a user group in Harbor.
 func (c *HarborClient) UpdateUserGroup(ctx context.Context, groupID int64, spec *UserGroupSpec) (*UserGroupStatus, error) {
 	if groupID <= 0 {
 		return nil, errors.New("group ID is required")
@@ -2545,16 +3323,26 @@ func (c *HarborClient) UpdateUserGroup(ctx context.Context, groupID int64, spec 
 
 	c.logger.Info("Updating Harbor user group", "groupId", groupID, "groupName", spec.GroupName)
 
-	// TODO: Implement actual Harbor API call
-	return &UserGroupStatus{
-		ID:          groupID,
+	ldapDn := ""
+	if spec.LdapGroupDn != nil {
+		ldapDn = *spec.LdapGroupDn
+	}
+	req := &harbormodels.UserGroup{
 		GroupName:   spec.GroupName,
 		GroupType:   spec.GroupType,
-		LdapGroupDn: *spec.LdapGroupDn,
-	}, nil
+		LdapGroupDn: ldapDn,
+	}
+	params := harborusergroup.NewUpdateUserGroupParams().WithContext(ctx).
+		WithGroupID(groupID).
+		WithUsergroup(req)
+	if _, err := v2Client.Usergroup.UpdateUserGroup(ctx, params); err != nil {
+		return nil, errors.Wrap(err, "cannot update Harbor user group")
+	}
+
+	return c.GetUserGroup(ctx, groupID)
 }
 
-// DeleteUserGroup deletes a user group from Harbor
+// DeleteUserGroup deletes a user group from Harbor. Idempotent on 404.
 func (c *HarborClient) DeleteUserGroup(ctx context.Context, groupID int64) error {
 	if groupID <= 0 {
 		return errors.New("group ID is required")
@@ -2567,6 +3355,12 @@ func (c *HarborClient) DeleteUserGroup(ctx context.Context, groupID int64) error
 
 	c.logger.Info("Deleting Harbor user group", "groupId", groupID)
 
-	// TODO: Implement actual Harbor API call
+	params := harborusergroup.NewDeleteUserGroupParams().WithContext(ctx).WithGroupID(groupID)
+	if _, err := v2Client.Usergroup.DeleteUserGroup(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor user group")
+	}
 	return nil
 }
