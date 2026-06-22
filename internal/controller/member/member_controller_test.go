@@ -68,7 +68,7 @@ func TestCreateNotMember(t *testing.T) {
 
 func TestObserveMemberNotFound(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -99,7 +99,7 @@ func TestObserveMemberNotFound(t *testing.T) {
 
 func TestObserveMemberExists(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -140,7 +140,7 @@ func TestObserveMemberExists(t *testing.T) {
 
 func TestObserveMemberNotUpToDate(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -181,7 +181,7 @@ func TestObserveMemberNotUpToDate(t *testing.T) {
 
 func TestObserveMemberNoRoleInSpec(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -221,7 +221,7 @@ func TestObserveMemberNoRoleInSpec(t *testing.T) {
 
 func TestCreateMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -250,7 +250,7 @@ func TestCreateMemberSuccess(t *testing.T) {
 
 func TestCreateMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -279,7 +279,7 @@ func TestCreateMemberError(t *testing.T) {
 
 func TestUpdateMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -308,7 +308,7 @@ func TestUpdateMemberSuccess(t *testing.T) {
 
 func TestUpdateMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -337,7 +337,7 @@ func TestUpdateMemberError(t *testing.T) {
 
 func TestDeleteMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -365,7 +365,7 @@ func TestDeleteMemberSuccess(t *testing.T) {
 
 func TestDeleteMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},
@@ -392,7 +392,7 @@ func TestDeleteMemberError(t *testing.T) {
 }
 
 func TestMemberHasRequiredFields(t *testing.T) {
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-member",
 			Namespace: "default",
@@ -421,7 +421,7 @@ func TestMemberHasRequiredFields(t *testing.T) {
 }
 
 func TestMemberStatusFields(t *testing.T) {
-	member := &v1beta1.Member{
+	member := &v1beta1.Member{ //nolint:staticcheck // exercising the deprecated Member kind
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-member",
 		},

@@ -57,12 +57,20 @@ type HarborClienter interface {
 	DeleteArtifact(ctx context.Context, projectID, repoName, reference string) error
 	GetArtifactVulnerabilities(ctx context.Context, projectID, repoName, reference string) (*ArtifactStatus, error)
 
-	// Member operations
+	// Member operations (deprecated user-only Member kind)
 	AddProjectMember(ctx context.Context, projectID, username, role string) error
 	ListProjectMembers(ctx context.Context, projectID string) ([]*MemberStatus, error)
 	GetProjectMember(ctx context.Context, projectID, username string) (*MemberStatus, error)
 	UpdateProjectMember(ctx context.Context, projectID, username, role string) error
 	DeleteProjectMember(ctx context.Context, projectID, username string) error
+
+	// UserMember / GroupMember operations (id-keyed member_user / member_group)
+	AddProjectUserMember(ctx context.Context, projectID, username, role string) (string, error)
+	AddProjectGroupMember(ctx context.Context, projectID, groupName string, groupType int64, role string) (string, error)
+	FindProjectMember(ctx context.Context, projectID, entityType, entityName string) (*MemberStatus, error)
+	GetProjectMemberByID(ctx context.Context, projectID, memberID string) (*MemberStatus, error)
+	UpdateProjectMemberByID(ctx context.Context, projectID, memberID, role string) error
+	DeleteProjectMemberByID(ctx context.Context, projectID, memberID string) error
 
 	// Scan operations
 	TriggerScan(ctx context.Context, projectID, repoName, reference string) error
@@ -164,6 +172,14 @@ type MockHarborClient struct {
 	GetProjectMemberFunc    func(ctx context.Context, projectID, username string) (*MemberStatus, error)
 	UpdateProjectMemberFunc func(ctx context.Context, projectID, username, role string) error
 	DeleteProjectMemberFunc func(ctx context.Context, projectID, username string) error
+
+	// UserMember / GroupMember operations
+	AddProjectUserMemberFunc    func(ctx context.Context, projectID, username, role string) (string, error)
+	AddProjectGroupMemberFunc   func(ctx context.Context, projectID, groupName string, groupType int64, role string) (string, error)
+	FindProjectMemberFunc       func(ctx context.Context, projectID, entityType, entityName string) (*MemberStatus, error)
+	GetProjectMemberByIDFunc    func(ctx context.Context, projectID, memberID string) (*MemberStatus, error)
+	UpdateProjectMemberByIDFunc func(ctx context.Context, projectID, memberID, role string) error
+	DeleteProjectMemberByIDFunc func(ctx context.Context, projectID, memberID string) error
 
 	// Scan operations
 	TriggerScanFunc func(ctx context.Context, projectID, repoName, reference string) error
@@ -539,6 +555,54 @@ func (m *MockHarborClient) UpdateProjectMember(ctx context.Context, projectID, u
 func (m *MockHarborClient) DeleteProjectMember(ctx context.Context, projectID, username string) error {
 	if m.DeleteProjectMemberFunc != nil {
 		return m.DeleteProjectMemberFunc(ctx, projectID, username)
+	}
+	return nil
+}
+
+// AddProjectUserMember calls AddProjectUserMemberFunc
+func (m *MockHarborClient) AddProjectUserMember(ctx context.Context, projectID, username, role string) (string, error) {
+	if m.AddProjectUserMemberFunc != nil {
+		return m.AddProjectUserMemberFunc(ctx, projectID, username, role)
+	}
+	return "1", nil
+}
+
+// AddProjectGroupMember calls AddProjectGroupMemberFunc
+func (m *MockHarborClient) AddProjectGroupMember(ctx context.Context, projectID, groupName string, groupType int64, role string) (string, error) {
+	if m.AddProjectGroupMemberFunc != nil {
+		return m.AddProjectGroupMemberFunc(ctx, projectID, groupName, groupType, role)
+	}
+	return "1", nil
+}
+
+// FindProjectMember calls FindProjectMemberFunc
+func (m *MockHarborClient) FindProjectMember(ctx context.Context, projectID, entityType, entityName string) (*MemberStatus, error) {
+	if m.FindProjectMemberFunc != nil {
+		return m.FindProjectMemberFunc(ctx, projectID, entityType, entityName)
+	}
+	return nil, nil
+}
+
+// GetProjectMemberByID calls GetProjectMemberByIDFunc
+func (m *MockHarborClient) GetProjectMemberByID(ctx context.Context, projectID, memberID string) (*MemberStatus, error) {
+	if m.GetProjectMemberByIDFunc != nil {
+		return m.GetProjectMemberByIDFunc(ctx, projectID, memberID)
+	}
+	return nil, nil
+}
+
+// UpdateProjectMemberByID calls UpdateProjectMemberByIDFunc
+func (m *MockHarborClient) UpdateProjectMemberByID(ctx context.Context, projectID, memberID, role string) error {
+	if m.UpdateProjectMemberByIDFunc != nil {
+		return m.UpdateProjectMemberByIDFunc(ctx, projectID, memberID, role)
+	}
+	return nil
+}
+
+// DeleteProjectMemberByID calls DeleteProjectMemberByIDFunc
+func (m *MockHarborClient) DeleteProjectMemberByID(ctx context.Context, projectID, memberID string) error {
+	if m.DeleteProjectMemberByIDFunc != nil {
+		return m.DeleteProjectMemberByIDFunc(ctx, projectID, memberID)
 	}
 	return nil
 }

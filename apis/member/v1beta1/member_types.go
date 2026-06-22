@@ -36,12 +36,19 @@ type MemberStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="member.harbor.m.crossplane.io/v1beta1 Member is deprecated; use UserMember (member_user) or GroupMember (member_group) instead"
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="USERNAME",type="string",JSONPath=".spec.forProvider.username"
 // +kubebuilder:printcolumn:name="ROLE",type="string",JSONPath=".spec.forProvider.role"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:scope=Namespaced,categories={crossplane,managed,harbor}
 
+// A Member adds a user to a Harbor project with a role.
+//
+// Deprecated: Member is a user-only catch-all kept for backwards compatibility.
+// Use UserMember (member_user) for users and GroupMember (member_group) for
+// groups; both are id-keyed and support adoption. Member will be removed in a
+// future release.
 type Member struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

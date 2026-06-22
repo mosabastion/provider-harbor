@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Project member split: UserMember / GroupMember
+
+- Added `UserMember` (`usermembers.member.harbor.m.crossplane.io`) — `forProvider`:
+  `projectId`, `username`, `role`. Creates `member_user.username`; observes/adopts
+  by `entity_type=="u"`.
+- Added `GroupMember` (`groupmembers.member.harbor.m.crossplane.io`) — `forProvider`:
+  `projectId`, `groupName`, `role`, optional `groupType` (default 3 = OIDC).
+  Creates `member_group.{group_name, group_type}`; observes/adopts by
+  `entity_type=="g"` matched on `groupName`.
+- Both kinds are id-keyed: the external name is the Harbor member id parsed from
+  the create `Location` header (adopted by entity type + name when the id is not
+  yet known), with full CRUD and `Available()` set in Observe.
+- Implemented the real Harbor member client paths on the monolithic
+  `internal/clients/harbor.go` (`createProjectMember`, `findProjectMemberByEntity`,
+  id-keyed get/update/delete, plus `AddProjectUserMember` / `AddProjectGroupMember`),
+  replacing the previous stub member methods. Added httptest proof tests.
+- **Deprecated** the user-only `Member` kind (still functional): served CRD version
+  marked `deprecated: true` with a `deprecationWarning`; use `UserMember` for users
+  and `GroupMember` for groups.
+
 ## v0.17.0 (2025-06-21)
 
 ### Achievement: Production Ready 🚀

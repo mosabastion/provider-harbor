@@ -23,6 +23,7 @@ import (
 
 	"github.com/rossigee/provider-harbor/apis"
 	artifactcontroller "github.com/rossigee/provider-harbor/internal/controller/artifact"
+	groupmembercontroller "github.com/rossigee/provider-harbor/internal/controller/groupmember"
 	membercontroller "github.com/rossigee/provider-harbor/internal/controller/member"
 	projectcontroller "github.com/rossigee/provider-harbor/internal/controller/project"
 	registrycontroller "github.com/rossigee/provider-harbor/internal/controller/registry"
@@ -34,6 +35,7 @@ import (
 	scannercontroller "github.com/rossigee/provider-harbor/internal/controller/scanner"
 	usercontroller "github.com/rossigee/provider-harbor/internal/controller/user"
 	usergroupcontroller "github.com/rossigee/provider-harbor/internal/controller/usergroup"
+	usermembercontroller "github.com/rossigee/provider-harbor/internal/controller/usermember"
 	webhookcontroller "github.com/rossigee/provider-harbor/internal/controller/webhook"
 	"github.com/rossigee/provider-harbor/internal/version"
 )
@@ -134,8 +136,14 @@ func main() {
 	// Setup Artifact controller
 	kingpin.FatalIfError(artifactcontroller.Setup(mgr, o), "Cannot setup Artifact controller")
 
-	// Setup Member controller
+	// Setup Member controller (deprecated user-only kind)
 	kingpin.FatalIfError(membercontroller.Setup(mgr, o), "Cannot setup Member controller")
+
+	// Setup UserMember controller
+	kingpin.FatalIfError(usermembercontroller.Setup(mgr, o), "Cannot setup UserMember controller")
+
+	// Setup GroupMember controller
+	kingpin.FatalIfError(groupmembercontroller.Setup(mgr, o), "Cannot setup GroupMember controller")
 
 	// Setup Scan controller
 	kingpin.FatalIfError(scancontroller.Setup(mgr, o), "Cannot setup Scan controller")

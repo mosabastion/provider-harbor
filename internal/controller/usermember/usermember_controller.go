@@ -2,7 +2,7 @@
 Copyright 2024 Crossplane Harbor Provider.
 */
 
-package member
+package usermember
 
 import (
 	"context"
@@ -13,12 +13,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rossigee/provider-harbor/apis/member/v1beta1"
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
@@ -26,16 +27,19 @@ import (
 )
 
 const (
-	errNotMember    = "managed resource is not a Member custom resource"
-	errMemberDelete = "cannot delete Harbor member"
-	errNewClient    = "cannot create new Harbor client"
+	errNotUserMember    = "managed resource is not a UserMember custom resource"
+	errUserMemberCreate = "cannot create Harbor user member"
+	errUserMemberUpdate = "cannot update Harbor user member"
+	errUserMemberDelete = "cannot delete Harbor user member"
+	errNewClient        = "cannot create new Harbor client"
 )
 
+// Setup adds a controller that reconciles UserMember managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
-	name := managed.ControllerName(v1beta1.MemberGroupVersionKind.Kind)
+	name := managed.ControllerName(v1beta1.UserMemberGroupVersionKind.Kind)
 
 	r := managed.NewReconciler(mgr,
-		resource.ManagedKind(v1beta1.MemberGroupVersionKind),
+		resource.ManagedKind(v1beta1.UserMemberGroupVersionKind),
 		managed.WithExternalConnector(&connector{
 			kube:         mgr.GetClient(),
 			newServiceFn: harborclients.NewHarborClientFromProviderConfig,
@@ -48,7 +52,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Named(name).
 		WithOptions(o).
 		WithEventFilter(resource.DesiredStateChanged()).
-		For(&v1beta1.Member{}). //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+		For(&v1beta1.UserMember{}).
 		Complete(ratelimiter.NewReconciler(name, r, nil))
 }
 
@@ -58,9 +62,9 @@ type connector struct {
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	_, ok := mg.(*v1beta1.Member) //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+	_, ok := mg.(*v1beta1.UserMember)
 	if !ok {
-		return nil, errors.New(errNotMember)
+		return nil, errors.New(errNotUserMember)
 	}
 
 	svc, err := c.newServiceFn(ctx, c.kube, mg)
@@ -76,67 +80,93 @@ type external struct {
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
-	cr, ok := mg.(*v1beta1.Member) //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+	cr, ok := mg.(*v1beta1.UserMember)
 	if !ok {
-		return managed.ExternalObservation{}, errors.New(errNotMember)
+		return managed.ExternalObservation{}, errors.New(errNotUserMember)
 	}
 
-	status, err := c.service.GetProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
+	projectID := cr.Spec.ForProvider.ProjectID
+
+	// Prefer the recorded Harbor member id (external name); fall back to adoption
+	// by entity type ("u") + username when the id is not yet known.
+	var status *harborclients.MemberStatus
+	var err error
+	if id := ctrlutil.GetExternalName(cr); id != "" {
+		status, err = c.service.GetProjectMemberByID(ctx, projectID, id)
+	} else {
+		status, err = c.service.FindProjectMember(ctx, projectID, "u", cr.Spec.ForProvider.Username)
+	}
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
+	if status == nil {
+		return managed.ExternalObservation{ResourceExists: false}, nil
+	}
+
+	ctrlutil.SetExternalName(cr, status.ID)
 
 	cr.Status.AtProvider.ID = &status.ID
 	cr.Status.AtProvider.MemberName = &status.MemberName
 	cr.Status.AtProvider.MemberType = &status.MemberType
 	cr.Status.AtProvider.Role = &status.Role
-	t := metav1.NewTime(status.CreationTime)
-	cr.Status.AtProvider.CreationTime = &t
+	cr.SetConditions(xpv1.Available())
 
 	upToDate := cr.Spec.ForProvider.Role == "" || status.Role == "" || cr.Spec.ForProvider.Role == status.Role
 
-	// Set external name for adoption tracking
-	ctrlutil.SetExternalName(cr, status.MemberName)
 	return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: upToDate}, nil
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
-	cr, ok := mg.(*v1beta1.Member) //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+	cr, ok := mg.(*v1beta1.UserMember)
 	if !ok {
-		return managed.ExternalCreation{}, errors.New(errNotMember)
+		return managed.ExternalCreation{}, errors.New(errNotUserMember)
 	}
 
-	err := c.service.AddProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
+	cr.SetConditions(xpv1.Creating())
+
+	id, err := c.service.AddProjectUserMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
 	if err != nil {
-		return managed.ExternalCreation{}, err
+		return managed.ExternalCreation{}, errors.Wrap(err, errUserMemberCreate)
 	}
+
+	ctrlutil.SetExternalName(cr, id)
 
 	return managed.ExternalCreation{}, nil
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	cr, ok := mg.(*v1beta1.Member) //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+	cr, ok := mg.(*v1beta1.UserMember)
 	if !ok {
-		return managed.ExternalUpdate{}, errors.New(errNotMember)
+		return managed.ExternalUpdate{}, errors.New(errNotUserMember)
 	}
 
-	err := c.service.UpdateProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
-	if err != nil {
-		return managed.ExternalUpdate{}, err
+	id := ctrlutil.GetExternalName(cr)
+	if id == "" {
+		return managed.ExternalUpdate{}, errors.New(errUserMemberUpdate + ": external name (member id) is empty")
+	}
+
+	if err := c.service.UpdateProjectMemberByID(ctx, cr.Spec.ForProvider.ProjectID, id, cr.Spec.ForProvider.Role); err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, errUserMemberUpdate)
 	}
 
 	return managed.ExternalUpdate{}, nil
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
-	cr, ok := mg.(*v1beta1.Member) //nolint:staticcheck // Member is intentionally still reconciled while deprecated
+	cr, ok := mg.(*v1beta1.UserMember)
 	if !ok {
-		return managed.ExternalDelete{}, errors.New(errNotMember)
+		return managed.ExternalDelete{}, errors.New(errNotUserMember)
 	}
 
-	err := c.service.DeleteProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
-	if err != nil {
-		return managed.ExternalDelete{}, errors.Wrap(err, errMemberDelete)
+	cr.SetConditions(xpv1.Deleting())
+
+	id := ctrlutil.GetExternalName(cr)
+	if id == "" {
+		return managed.ExternalDelete{}, nil
+	}
+
+	if err := c.service.DeleteProjectMemberByID(ctx, cr.Spec.ForProvider.ProjectID, id); err != nil {
+		return managed.ExternalDelete{}, errors.Wrap(err, errUserMemberDelete)
 	}
 
 	return managed.ExternalDelete{}, nil

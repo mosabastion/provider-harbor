@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	memberv1beta1 "github.com/rossigee/provider-harbor/apis/member/v1beta1"
 	projectv1beta1 "github.com/rossigee/provider-harbor/apis/project/v1beta1"
 	registryv1beta1 "github.com/rossigee/provider-harbor/apis/registry/v1beta1"
 	robotv1beta1 "github.com/rossigee/provider-harbor/apis/robot/v1beta1"
@@ -240,6 +241,12 @@ func NewHarborClientFromProviderConfig(ctx context.Context, k8sClient client.Cli
 		configRef = usergroup.Spec.ProviderConfigReference
 	} else if robot, ok := mg.(*robotv1beta1.Robot); ok {
 		configRef = robot.Spec.ProviderConfigReference
+	} else if member, ok := mg.(*memberv1beta1.Member); ok { //nolint:staticcheck // Member is intentionally still supported while deprecated
+		configRef = member.Spec.ProviderConfigReference
+	} else if userMember, ok := mg.(*memberv1beta1.UserMember); ok {
+		configRef = userMember.Spec.ProviderConfigReference
+	} else if groupMember, ok := mg.(*memberv1beta1.GroupMember); ok {
+		configRef = groupMember.Spec.ProviderConfigReference
 	} else {
 		// Fallback: assume the managed resource has ProviderConfigReference
 		// This is a bit of a hack but works for most cases
@@ -1185,131 +1192,6 @@ func (c *HarborClient) GetArtifactVulnerabilities(ctx context.Context, projectID
 	}
 
 	return status, nil
-}
-
-// MemberStatus represents a Harbor project member
-type MemberStatus struct {
-	ID           string
-	MemberName   string
-	MemberType   string
-	Role         string
-	CreationTime time.Time
-}
-
-// AddProjectMember adds a member to a Harbor project
-func (c *HarborClient) AddProjectMember(ctx context.Context, projectID, username, role string) error {
-	if projectID == "" {
-		return errors.New("project ID is required")
-	}
-	if username == "" {
-		return errors.New("username is required")
-	}
-	if role == "" {
-		return errors.New("role is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Adding Harbor project member", "projectId", projectID, "username", username, "role", role)
-
-	return nil
-}
-
-// ListProjectMembers lists members of a Harbor project
-func (c *HarborClient) ListProjectMembers(ctx context.Context, projectID string) ([]*MemberStatus, error) {
-	if projectID == "" {
-		return nil, errors.New("project ID is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Listing Harbor project members", "projectId", projectID)
-
-	members := []*MemberStatus{
-		{
-			ID:           "1",
-			MemberName:   "admin",
-			MemberType:   "user",
-			Role:         "master",
-			CreationTime: time.Now().Add(-30 * 24 * time.Hour),
-		},
-	}
-
-	return members, nil
-}
-
-// GetProjectMember retrieves a specific project member
-func (c *HarborClient) GetProjectMember(ctx context.Context, projectID, username string) (*MemberStatus, error) {
-	if projectID == "" {
-		return nil, errors.New("project ID is required")
-	}
-	if username == "" {
-		return nil, errors.New("username is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return nil, errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Retrieving Harbor project member", "projectId", projectID, "username", username)
-
-	member := &MemberStatus{
-		ID:           "1",
-		MemberName:   username,
-		MemberType:   "user",
-		Role:         "developer",
-		CreationTime: time.Now().Add(-10 * 24 * time.Hour),
-	}
-
-	return member, nil
-}
-
-// UpdateProjectMember updates a project member's role
-func (c *HarborClient) UpdateProjectMember(ctx context.Context, projectID, username, role string) error {
-	if projectID == "" {
-		return errors.New("project ID is required")
-	}
-	if username == "" {
-		return errors.New("username is required")
-	}
-	if role == "" {
-		return errors.New("role is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Updating Harbor project member", "projectId", projectID, "username", username, "role", role)
-
-	return nil
-}
-
-// DeleteProjectMember removes a member from a project
-func (c *HarborClient) DeleteProjectMember(ctx context.Context, projectID, username string) error {
-	if projectID == "" {
-		return errors.New("project ID is required")
-	}
-	if username == "" {
-		return errors.New("username is required")
-	}
-
-	v2Client := c.clientSet.V2()
-	if v2Client == nil {
-		return errors.New("failed to get Harbor v2 client")
-	}
-
-	c.logger.Info("Deleting Harbor project member", "projectId", projectID, "username", username)
-
-	return nil
 }
 
 // ScanStatus represents the status of an artifact scan
