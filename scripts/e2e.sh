@@ -5,10 +5,11 @@
 # Helm chart, in-cluster, no TLS/persistence) -> the provider package -> then
 # runs uptest (apply -> Ready -> delete) over examples/e2e/*.
 #
-# uptest's import/update sub-steps are skipped: they generate kubectl-plugin/
-# scale commands incompatible with current kubectl + namespaced v2 MRs. The
-# create/observe/delete lifecycle against a real Harbor is what this validates;
-# drift/observe-rematch logic is covered by the unit tests.
+# Runs uptest v2 (namespaced-aware): apply -> Ready -> import -> delete. The
+# import step (delete local state, re-observe the real external resource) works
+# on namespaced v2 MRs with uptest v2 (it didn't on v1). The update step is
+# skipped — it needs per-example uptest.upbound.io/update-parameter annotations;
+# drift/observe-rematch logic is otherwise covered by the unit tests.
 #
 # Env knobs:
 #   KIND_CLUSTER (harbor-e2e)  REGISTRY (ghcr.io/mosabastion)  PROVIDER (provider-harbor)
@@ -32,9 +33,17 @@ k() { kubectl --context "$KCTX" "$@"; }
 require() { for c in "$@"; do command -v "$c" >/dev/null || { echo "missing: $c"; exit 1; }; done; }
 require kind kubectl helm
 CHAINSAW="${CHAINSAW:-$(command -v chainsaw || true)}"
-UPTEST="${UPTEST:-$(command -v uptest || echo "$(go env GOPATH)/bin/uptest")}"
-[ -x "$UPTEST" ] || { log "installing uptest"; GOBIN="$(go env GOPATH)/bin" go install github.com/crossplane/uptest/cmd/uptest@v1.4.0; }
 [ -n "$CHAINSAW" ] || { echo "missing: chainsaw"; exit 1; }
+# uptest v2 (namespaced-aware) is NOT `go install`-able — its go.mod has an
+# exclude directive, which `go install pkg@version` rejects — so fetch the
+# released binary. Cached by version so a pin bump just downloads a new file.
+UPTEST_VERSION="${UPTEST_VERSION:-v2.2.0}"
+UPTEST="${UPTEST:-$(go env GOPATH)/bin/uptest-${UPTEST_VERSION}}"
+if [ ! -x "$UPTEST" ]; then
+  log "downloading uptest ${UPTEST_VERSION}"
+  curl -fsSL "https://github.com/crossplane/uptest/releases/download/${UPTEST_VERSION}/uptest_$(go env GOOS)-$(go env GOARCH)" -o "$UPTEST"
+  chmod +x "$UPTEST"
+fi
 
 log "ensure kind cluster ${KIND_CLUSTER}"
 kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER" || kind create cluster --name "$KIND_CLUSTER"
@@ -97,7 +106,7 @@ rc=0
 KUBECTL=$(command -v kubectl) CHAINSAW="$CHAINSAW" \
   "$UPTEST" e2e "$LIST" \
   --setup-script="$ROOT/test/e2e/uptest-setup.sh" \
-  --default-conditions=Ready --skip-import --skip-update --default-timeout=600s || rc=$?
+  --default-conditions=Ready --skip-update --default-timeout=600s || rc=$?
 
 if [ -z "${KEEP:-}" ]; then
   log "delete kind cluster ${KIND_CLUSTER}"
