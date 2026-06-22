@@ -18,6 +18,7 @@ package clients
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	harborartifact "github.com/goharbor/go-client/pkg/sdk/v2.0/client/artifact"
@@ -216,7 +217,12 @@ func (c *HarborClient) StopScan(ctx context.Context, projectID, repoName, refere
 		WithRepositoryName(repoName).
 		WithReference(reference)
 	if _, err := v2Client.Scan.StopScanArtifact(ctx, params); err != nil {
-		if isHarborNotFound(err) {
+		// A Scan is an action, not a deletable resource. Stop is only meaningful
+		// while a scan is running; Harbor returns 422 (UnprocessableEntity) when
+		// there's nothing to stop (e.g. the scan already completed) and 404 if the
+		// artifact is gone. Both mean "nothing to do" — treat as success so the
+		// managed resource can be deleted.
+		if isHarborNotFound(err) || isHarborCode(err, http.StatusUnprocessableEntity) {
 			return nil
 		}
 		return errors.Wrap(err, "cannot stop Harbor artifact scan")

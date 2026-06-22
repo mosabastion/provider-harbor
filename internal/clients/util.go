@@ -27,23 +27,28 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// isHarborNotFound reports whether err represents a Harbor 404. Harbor's swagger
-// is inconsistent: some operations carry a typed NotFound response (which
+// isHarborCode reports whether err represents a given HTTP status from Harbor.
+// Harbor's swagger is inconsistent: some operations carry a typed response (which
 // implements IsCode), while others surface a generic *runtime.APIError. This
-// detects both so callers can map "absent" to the (nil, nil) not-found contract.
-func isHarborNotFound(err error) bool {
+// detects both.
+func isHarborCode(err error, code int) bool {
 	if err == nil {
 		return false
 	}
 	var apiErr *runtime.APIError
-	if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+	if errors.As(err, &apiErr) && apiErr.Code == code {
 		return true
 	}
 	var coder interface{ IsCode(int) bool }
 	if errors.As(err, &coder) {
-		return coder.IsCode(http.StatusNotFound)
+		return coder.IsCode(code)
 	}
 	return false
+}
+
+// isHarborNotFound maps a Harbor 404 to the (nil, nil) not-found contract.
+func isHarborNotFound(err error) bool {
+	return isHarborCode(err, http.StatusNotFound)
 }
 
 // idFromLocation extracts the trailing numeric ID from a Harbor Location header
