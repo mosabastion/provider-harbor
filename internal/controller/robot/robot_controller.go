@@ -153,13 +153,9 @@ func robotObservation(cr *v1beta1.Robot, robot *harborclients.RobotStatus) manag
 	ut := metav1.NewTime(robot.UpdateTime)
 	cr.Status.AtProvider.UpdateTime = &ut
 
-	upToDate := true
-	if cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description {
-		upToDate = false
-	}
-	if cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID {
-		upToDate = false
-	}
+	descDrifted := cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description
+	projDrifted := cr.Spec.ForProvider.ProjectID != nil && robot.ProjectID != nil && *cr.Spec.ForProvider.ProjectID != *robot.ProjectID
+	upToDate := !descDrifted && !projDrifted
 
 	// Mark Available: the resource exists and is usable. Drift is signalled via
 	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.
