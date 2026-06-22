@@ -47,7 +47,7 @@ jobs:
           chmod +x "$BIN/crossplane" "$BIN/kind" "$BIN/chainsaw"
           HELM_INSTALL_DIR="$BIN" USE_SUDO=false bash <(curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3)
           echo "$BIN" >> "$GITHUB_PATH"
-          "$BIN/crossplane" --version; "$BIN/kind" --version; "$BIN/helm" version --short; "$BIN/chainsaw" version
+          "$BIN/crossplane" version --client; "$BIN/kind" --version; "$BIN/helm" version --short; "$BIN/chainsaw" version
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
