@@ -33,7 +33,7 @@ require() { for c in "$@"; do command -v "$c" >/dev/null || { echo "missing: $c"
 require kind kubectl helm
 CHAINSAW="${CHAINSAW:-$(command -v chainsaw || true)}"
 UPTEST="${UPTEST:-$(command -v uptest || echo "$(go env GOPATH)/bin/uptest")}"
-[ -x "$UPTEST" ] || { log "installing uptest"; GOBIN="$(go env GOPATH)/bin" go install github.com/crossplane/uptest/cmd/uptest@latest; }
+[ -x "$UPTEST" ] || { log "installing uptest"; GOBIN="$(go env GOPATH)/bin" go install github.com/crossplane/uptest/cmd/uptest@v1.4.0; }
 [ -n "$CHAINSAW" ] || { echo "missing: chainsaw"; exit 1; }
 
 log "ensure kind cluster ${KIND_CLUSTER}"
