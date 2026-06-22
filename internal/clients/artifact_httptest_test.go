@@ -316,16 +316,15 @@ func TestScanClient_TriggerAndGet(t *testing.T) {
 	c := newTestClient(t, srv.URL)
 	ctx := context.Background()
 
-	// Before trigger: artifact exists but no scan started → scan_overview empty.
+	// Before trigger: artifact exists but no scan_overview → GetScan reports
+	// (nil, nil) so the reconciler treats it as not-yet-created and triggers a
+	// scan (rather than adopting an un-scanned artifact that never goes Ready).
 	sc, err := c.GetScan(ctx, "library", "alpine", "latest")
 	if err != nil {
 		t.Fatalf("GetScan before trigger: %v", err)
 	}
-	if sc == nil {
-		t.Fatal("expected non-nil ScanStatus (artifact exists)")
-	}
-	if sc.Status != "" {
-		t.Errorf("expected empty status before scan, got %q", sc.Status)
+	if sc != nil {
+		t.Fatalf("expected nil ScanStatus before any scan, got %+v", sc)
 	}
 
 	// Trigger scan.

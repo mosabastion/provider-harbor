@@ -143,6 +143,22 @@ func userGroupExternalID(cr *v1beta1.UserGroup) string {
 	return en
 }
 
+// userGroupID returns the Harbor group id for Update/Delete. The external name is
+// authoritative (crossplane-runtime persists it reliably after Create); the
+// status subresource is a best-effort fallback (it does not always persist, which
+// is exactly why Delete must not rely on it).
+func userGroupID(cr *v1beta1.UserGroup) int64 {
+	if s := userGroupExternalID(cr); s != "" {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return v
+		}
+	}
+	if cr.Status.AtProvider.ID != nil {
+		return *cr.Status.AtProvider.ID
+	}
+	return 0
+}
+
 func userGroupObservation(cr *v1beta1.UserGroup, group *harborclients.UserGroupStatus) managed.ExternalObservation {
 	cr.Status.AtProvider.ID = &group.ID
 
@@ -198,7 +214,8 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.New(errNotUserGroup)
 	}
 
-	if cr.Status.AtProvider.ID == nil {
+	id := userGroupID(cr)
+	if id <= 0 {
 		return managed.ExternalUpdate{}, errors.New("user group ID not found")
 	}
 
@@ -209,7 +226,7 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		LdapGroupDn: cr.Spec.ForProvider.LdapGroupDn,
 	}
 
-	_, err := c.service.UpdateUserGroup(ctx, *cr.Status.AtProvider.ID, spec)
+	_, err := c.service.UpdateUserGroup(ctx, id, spec)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrap(err, errUserGroupUpdate)
 	}
@@ -227,13 +244,15 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalDelete{}, errors.New(errNotUserGroup)
 	}
 
-	if cr.Status.AtProvider.ID == nil {
-		return managed.ExternalDelete{}, errors.New("user group ID not found")
-	}
-
 	cr.SetConditions(xpv1.Deleting())
 
-	err := c.service.DeleteUserGroup(ctx, *cr.Status.AtProvider.ID)
+	id := userGroupID(cr)
+	if id <= 0 {
+		// Never observed/created — nothing to delete.
+		return managed.ExternalDelete{}, nil
+	}
+
+	err := c.service.DeleteUserGroup(ctx, id)
 	if err != nil {
 		return managed.ExternalDelete{}, errors.Wrap(err, errUserGroupDelete)
 	}

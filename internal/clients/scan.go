@@ -167,7 +167,9 @@ func (c *HarborClient) GetScan(ctx context.Context, projectID, repoName, referen
 
 	scan := &ScanStatus{}
 	// Pick the first scan report from the overview map (keyed by MIME type).
+	found := false
 	for _, rep := range resp.Payload.ScanOverview {
+		found = true
 		scan.ID = rep.ReportID
 		scan.Status = rep.ScanStatus
 		scan.StartTime = time.Time(rep.StartTime)
@@ -179,6 +181,12 @@ func (c *HarborClient) GetScan(ctx context.Context, projectID, repoName, referen
 			scan.LowCount = rep.Summary.Summary["Low"]
 		}
 		break
+	}
+	// The artifact exists but has no scan overview yet → no scan has run. Report
+	// not-found so the reconciler triggers a scan (Create -> TriggerScan) rather
+	// than treating the un-scanned artifact as an existing, never-ready Scan.
+	if !found {
+		return nil, nil
 	}
 	return scan, nil
 }

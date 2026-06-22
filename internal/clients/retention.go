@@ -313,6 +313,11 @@ func (c *HarborClient) DeleteRetentionPolicy(ctx context.Context, projectID, pol
 
 	c.logger.Info("Deleting Harbor retention policy", "projectId", projectID, "policyId", policyID)
 
+	// NOTE: DELETE /retentions/{id} currently panics server-side in Harbor (500),
+	// which we hit via this provider during e2e. Tracked upstream:
+	//   https://github.com/goharbor/harbor/issues/23345  (fix: PR #23407)
+	// The request below is correct; until the fix ships, retention delete fails
+	// and the retention e2e is disabled (see examples/e2e/retention.yaml.disabled).
 	params := harborretention.NewDeleteRetentionParams().WithContext(ctx).WithID(id)
 	if _, err := v2Client.Retention.DeleteRetention(ctx, params); err != nil {
 		if isHarborNotFound(err) {

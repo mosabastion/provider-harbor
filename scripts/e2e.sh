@@ -52,8 +52,8 @@ k create namespace harbor --dry-run=client -o yaml | k apply -f - >/dev/null
 helm --kube-context "$KCTX" upgrade --install my-harbor harbor/harbor -n harbor \
   --set expose.type=clusterIP --set expose.tls.enabled=false \
   --set externalURL=http://harbor.harbor.svc --set persistence.enabled=false \
-  --set harborAdminPassword="$HARBOR_PASSWORD" --set trivy.enabled=false \
-  --set jobservice.replicas=1 --wait --timeout 8m >/dev/null
+  --set harborAdminPassword="$HARBOR_PASSWORD" --set trivy.enabled=true \
+  --set jobservice.replicas=1 --wait --timeout 10m >/dev/null
 
 log "install provider ${IMAGE}:${VERSION}"
 PULL_REF=""
