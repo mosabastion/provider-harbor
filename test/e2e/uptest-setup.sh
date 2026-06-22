@@ -51,7 +51,8 @@ spec:
       restartPolicy: Never
       containers:
         - name: seed
-          image: alpine:3.20
+          # gcr mirror avoids Docker Hub anonymous pull-rate limits in CI.
+          image: mirror.gcr.io/library/alpine:3.20
           env:
             - {name: HARBOR, value: "harbor.harbor.svc"}
             - {name: PW, value: "${HARBOR_PASSWORD}"}
@@ -69,7 +70,7 @@ spec:
                 -d "{\"project_name\":\"\$PROJECT\",\"public\":true}" || true
               echo "pushing busybox -> \$HARBOR/\$PROJECT/busybox:latest"
               crane auth login "\$HARBOR" -u admin -p "\$PW" --insecure
-              crane copy busybox:latest "\$HARBOR/\$PROJECT/busybox:latest" --insecure
+              crane copy mirror.gcr.io/library/busybox:latest "\$HARBOR/\$PROJECT/busybox:latest" --insecure
               echo "seed done"
 YAML
 ${KUBECTL} -n "$NS" wait --for=condition=complete job/seed-image --timeout=300s
