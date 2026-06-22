@@ -9,10 +9,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// MemberParameters defines a Harbor project member. A member is EITHER a user
+// (Username set) OR a group (GroupName set) — exactly one of the two.
+// +kubebuilder:validation:XValidation:rule="(has(self.username) && self.username != '') != (has(self.groupName) && self.groupName != '')",message="exactly one of username or groupName must be set"
 type MemberParameters struct {
 	ProjectID string `json:"projectId"`
-	Username  string `json:"username"`
-	Role      string `json:"role"`
+	// Username of the user member. Mutually exclusive with groupName.
+	// +optional
+	Username string `json:"username,omitempty"`
+	// GroupName of the group member (e.g. a Keycloak/OIDC group). Mutually
+	// exclusive with username.
+	// +optional
+	GroupName string `json:"groupName,omitempty"`
+	// MemberGroupType is Harbor's group_type for a group member: 1 LDAP, 2 HTTP,
+	// 3 OIDC. Defaults to 3 (OIDC). Only used when groupName is set.
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Enum=1;2;3
+	MemberGroupType *int64 `json:"memberGroupType,omitempty"`
+	Role            string `json:"role"`
 }
 
 type MemberObservation struct {

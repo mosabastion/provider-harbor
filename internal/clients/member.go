@@ -82,10 +82,18 @@ func memberStatusFromEntity(m *harbormodels.ProjectMemberEntity) *MemberStatus {
 	return st
 }
 
-// findProjectMember returns the Harbor member entity for username, or nil if the
-// project has no such member. Harbor exposes no get-member-by-name, so we list
-// and match — the numeric member id this yields is required by update/delete.
+// findProjectMember returns the Harbor user member entity for username, or nil
+// if the project has no such member. Harbor exposes no get-member-by-name, so we
+// list and match — the numeric member id this yields is required by
+// update/delete.
 func (c *HarborClient) findProjectMember(ctx context.Context, projectID, username string) (*harbormodels.ProjectMemberEntity, error) {
+	return c.findProjectMemberByEntity(ctx, projectID, username, "u")
+}
+
+// findProjectMemberByEntity returns the member entity matching entityName and
+// entityType ("u" user, "g" group), or nil if absent. Matching on entity_type
+// keeps a user member and a group member that happen to share a name distinct.
+func (c *HarborClient) findProjectMemberByEntity(ctx context.Context, projectID, entityName, entityType string) (*harbormodels.ProjectMemberEntity, error) {
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
 		return nil, errors.New("failed to get Harbor v2 client")
@@ -104,7 +112,7 @@ func (c *HarborClient) findProjectMember(ctx context.Context, projectID, usernam
 		return nil, errors.Wrap(err, "cannot list Harbor project members")
 	}
 	for _, m := range resp.Payload {
-		if m != nil && m.EntityName == username {
+		if m != nil && m.EntityName == entityName && m.EntityType == entityType {
 			return m, nil
 		}
 	}
@@ -277,6 +285,158 @@ func (c *HarborClient) DeleteProjectMember(ctx context.Context, projectID, usern
 			return nil
 		}
 		return errors.Wrap(err, "cannot delete Harbor project member")
+	}
+	return nil
+}
+
+// defaultMemberGroupType is Harbor's group_type for OIDC groups; the platform
+// binds Keycloak/OIDC groups so this is the default when unset.
+const defaultMemberGroupType int64 = 3
+
+func resolveGroupType(groupType *int64) int64 {
+	if groupType != nil && *groupType != 0 {
+		return *groupType
+	}
+	return defaultMemberGroupType
+}
+
+// AddProjectGroupMember adds a group member to a Harbor project with the given
+// role. groupType is Harbor's group_type (1 LDAP, 2 HTTP, 3 OIDC); when nil/0 it
+// defaults to OIDC.
+func (c *HarborClient) AddProjectGroupMember(ctx context.Context, projectID, groupName string, groupType *int64, role string) error {
+	if projectID == "" {
+		return errors.New("project ID is required")
+	}
+	if groupName == "" {
+		return errors.New("group name is required")
+	}
+	roleID, err := memberRoleID(role)
+	if err != nil {
+		return err
+	}
+
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return errors.New("failed to get Harbor v2 client")
+	}
+
+	gt := resolveGroupType(groupType)
+	c.logger.Info("Adding Harbor project group member", "projectId", projectID, "groupName", groupName, "groupType", gt, "role", role)
+
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewCreateProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithProjectMember(&harbormodels.ProjectMember{
+			RoleID:      roleID,
+			MemberGroup: &harbormodels.UserGroup{GroupName: groupName, GroupType: gt},
+		})
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.CreateProjectMember(ctx, params); err != nil {
+		return errors.Wrap(err, "cannot add Harbor project group member")
+	}
+	return nil
+}
+
+// GetProjectGroupMember retrieves a specific group member by name, returning
+// (nil, nil) when the project has no such group member.
+func (c *HarborClient) GetProjectGroupMember(ctx context.Context, projectID, groupName string) (*MemberStatus, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if groupName == "" {
+		return nil, errors.New("group name is required")
+	}
+
+	m, err := c.findProjectMemberByEntity(ctx, projectID, groupName, "g")
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return nil, nil
+	}
+	return memberStatusFromEntity(m), nil
+}
+
+// UpdateProjectGroupMember updates a group member's role.
+func (c *HarborClient) UpdateProjectGroupMember(ctx context.Context, projectID, groupName, role string) error {
+	if projectID == "" {
+		return errors.New("project ID is required")
+	}
+	if groupName == "" {
+		return errors.New("group name is required")
+	}
+	roleID, err := memberRoleID(role)
+	if err != nil {
+		return err
+	}
+
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return errors.New("failed to get Harbor v2 client")
+	}
+
+	m, err := c.findProjectMemberByEntity(ctx, projectID, groupName, "g")
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return errors.Errorf("Harbor project group member %q not found", groupName)
+	}
+
+	c.logger.Info("Updating Harbor project group member", "projectId", projectID, "groupName", groupName, "role", role)
+
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewUpdateProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithMid(m.ID).
+		WithRole(&harbormodels.RoleRequest{RoleID: roleID})
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.UpdateProjectMember(ctx, params); err != nil {
+		return errors.Wrap(err, "cannot update Harbor project group member")
+	}
+	return nil
+}
+
+// DeleteProjectGroupMember removes a group member from a project (idempotent).
+func (c *HarborClient) DeleteProjectGroupMember(ctx context.Context, projectID, groupName string) error {
+	if projectID == "" {
+		return errors.New("project ID is required")
+	}
+	if groupName == "" {
+		return errors.New("group name is required")
+	}
+
+	v2Client := c.clientSet.V2()
+	if v2Client == nil {
+		return errors.New("failed to get Harbor v2 client")
+	}
+
+	m, err := c.findProjectMemberByEntity(ctx, projectID, groupName, "g")
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		return nil
+	}
+
+	c.logger.Info("Deleting Harbor project group member", "projectId", projectID, "groupName", groupName)
+
+	ref, isName := projectRef(projectID)
+	params := harbormember.NewDeleteProjectMemberParams().WithContext(ctx).
+		WithProjectNameOrID(ref).
+		WithMid(m.ID)
+	if isName != nil {
+		params = params.WithXIsResourceName(isName)
+	}
+	if _, err := v2Client.Member.DeleteProjectMember(ctx, params); err != nil {
+		if isHarborNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "cannot delete Harbor project group member")
 	}
 	return nil
 }

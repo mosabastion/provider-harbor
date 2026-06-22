@@ -65,6 +65,11 @@ type MockHarborClient struct {
 	UpdateProjectMemberFunc func(ctx context.Context, projectID, username, role string) error
 	DeleteProjectMemberFunc func(ctx context.Context, projectID, username string) error
 
+	AddProjectGroupMemberFunc    func(ctx context.Context, projectID, groupName string, groupType *int64, role string) error
+	GetProjectGroupMemberFunc    func(ctx context.Context, projectID, groupName string) (*harborclients.MemberStatus, error)
+	UpdateProjectGroupMemberFunc func(ctx context.Context, projectID, groupName, role string) error
+	DeleteProjectGroupMemberFunc func(ctx context.Context, projectID, groupName string) error
+
 	// Scan operations
 	TriggerScanFunc func(ctx context.Context, projectID, repoName, reference string) error
 	ListScansFunc   func(ctx context.Context, projectID, repoName string) ([]*harborclients.ScanStatus, error)
@@ -432,6 +437,38 @@ func (m *MockHarborClient) UpdateProjectMember(ctx context.Context, projectID, u
 func (m *MockHarborClient) DeleteProjectMember(ctx context.Context, projectID, username string) error {
 	if m.DeleteProjectMemberFunc != nil {
 		return m.DeleteProjectMemberFunc(ctx, projectID, username)
+	}
+	return nil
+}
+
+// AddProjectGroupMember calls AddProjectGroupMemberFunc
+func (m *MockHarborClient) AddProjectGroupMember(ctx context.Context, projectID, groupName string, groupType *int64, role string) error {
+	if m.AddProjectGroupMemberFunc != nil {
+		return m.AddProjectGroupMemberFunc(ctx, projectID, groupName, groupType, role)
+	}
+	return nil
+}
+
+// GetProjectGroupMember calls GetProjectGroupMemberFunc
+func (m *MockHarborClient) GetProjectGroupMember(ctx context.Context, projectID, groupName string) (*harborclients.MemberStatus, error) {
+	if m.GetProjectGroupMemberFunc != nil {
+		return m.GetProjectGroupMemberFunc(ctx, projectID, groupName)
+	}
+	return nil, nil
+}
+
+// UpdateProjectGroupMember calls UpdateProjectGroupMemberFunc
+func (m *MockHarborClient) UpdateProjectGroupMember(ctx context.Context, projectID, groupName, role string) error {
+	if m.UpdateProjectGroupMemberFunc != nil {
+		return m.UpdateProjectGroupMemberFunc(ctx, projectID, groupName, role)
+	}
+	return nil
+}
+
+// DeleteProjectGroupMember calls DeleteProjectGroupMemberFunc
+func (m *MockHarborClient) DeleteProjectGroupMember(ctx context.Context, projectID, groupName string) error {
+	if m.DeleteProjectGroupMemberFunc != nil {
+		return m.DeleteProjectGroupMemberFunc(ctx, projectID, groupName)
 	}
 	return nil
 }

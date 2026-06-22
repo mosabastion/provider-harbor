@@ -172,7 +172,9 @@ func TestRobotClient_RealCRUD(t *testing.T) {
 	}
 }
 
-func fakeHarborMembers(t *testing.T) *httptest.Server {
+// fakeHarborMembers returns the fake server plus a pointer to the group_type the
+// last member_group POST carried, so a test can assert the request body.
+func fakeHarborMembers(t *testing.T) (*httptest.Server, *int) {
 	t.Helper()
 	var mu sync.Mutex
 	type member struct {
@@ -183,6 +185,7 @@ func fakeHarborMembers(t *testing.T) *httptest.Server {
 	}
 	members := map[int]*member{}
 	nextID := 0
+	lastGroupType := 0
 
 	memberJSON := func(m *member) string {
 		return fmt.Sprintf(`{"id":%d,"entity_name":%q,"entity_type":%q,"role_id":%d,"project_id":1}`,
@@ -200,14 +203,24 @@ func fakeHarborMembers(t *testing.T) *httptest.Server {
 				MemberUser *struct {
 					Username string `json:"username"`
 				} `json:"member_user"`
+				MemberGroup *struct {
+					GroupName string `json:"group_name"`
+					GroupType int    `json:"group_type"`
+				} `json:"member_group"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			nextID++
 			name := ""
-			if body.MemberUser != nil {
+			entityTp := "u"
+			switch {
+			case body.MemberGroup != nil:
+				name = body.MemberGroup.GroupName
+				entityTp = "g"
+				lastGroupType = body.MemberGroup.GroupType
+			case body.MemberUser != nil:
 				name = body.MemberUser.Username
 			}
-			members[nextID] = &member{id: nextID, name: name, roleID: body.RoleID, entityTp: "u"}
+			members[nextID] = &member{id: nextID, name: name, roleID: body.RoleID, entityTp: entityTp}
 			w.Header().Set("Location", "/api/v2.0/projects/1/members/"+itoa(nextID))
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodGet:
@@ -249,11 +262,11 @@ func fakeHarborMembers(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
-	return httptest.NewServer(mux)
+	return httptest.NewServer(mux), &lastGroupType
 }
 
 func TestMemberClient_RealCRUD(t *testing.T) {
-	srv := fakeHarborMembers(t)
+	srv, _ := fakeHarborMembers(t)
 	defer srv.Close()
 	c := newTestClient(t, srv.URL)
 	ctx := context.Background()
@@ -309,5 +322,78 @@ func TestMemberClient_RealCRUD(t *testing.T) {
 	}
 	if err := c.DeleteProjectMember(ctx, "1", "alice"); err != nil {
 		t.Fatalf("idempotent DeleteProjectMember: %v", err)
+	}
+}
+
+func TestMemberClient_GroupRealCRUD(t *testing.T) {
+	srv, lastGroupType := fakeHarborMembers(t)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	// Not found before creation -> (nil, nil).
+	if st, err := c.GetProjectGroupMember(ctx, "1", "platform-admins"); err != nil || st != nil {
+		t.Fatalf("expected (nil,nil) before add, got st=%v err=%v", st, err)
+	}
+
+	// Add an OIDC group member (group_type 3) as developer.
+	gt := int64(3)
+	if err := c.AddProjectGroupMember(ctx, "1", "platform-admins", &gt, "developer"); err != nil {
+		t.Fatalf("AddProjectGroupMember: %v", err)
+	}
+	// The POST body carried member_group.group_name (and group_type 3), not member_user.
+	if *lastGroupType != 3 {
+		t.Errorf("expected request body member_group.group_type 3, got %d", *lastGroupType)
+	}
+
+	// Get -> resolves the real numeric id, maps entity_type "g" to "group".
+	st, err := c.GetProjectGroupMember(ctx, "1", "platform-admins")
+	if err != nil || st == nil {
+		t.Fatalf("GetProjectGroupMember after add: st=%v err=%v", st, err)
+	}
+	if st.ID != "1" {
+		t.Errorf("expected real member id 1 parsed from API, got %q", st.ID)
+	}
+	if st.MemberType != "group" {
+		t.Errorf("expected member type group (from entity_type g), got %q", st.MemberType)
+	}
+	if st.Role != "developer" {
+		t.Errorf("expected role developer mapped from role_id 2, got %q", st.Role)
+	}
+
+	// A user lookup of the same name must NOT match the group member.
+	if u, err := c.GetProjectMember(ctx, "1", "platform-admins"); err != nil || u != nil {
+		t.Fatalf("expected (nil,nil) for user lookup of a group name, got st=%v err=%v", u, err)
+	}
+
+	// Update role developer -> maintainer (role_id 4), confirm round-trip.
+	if err := c.UpdateProjectGroupMember(ctx, "1", "platform-admins", "maintainer"); err != nil {
+		t.Fatalf("UpdateProjectGroupMember: %v", err)
+	}
+	st2, err := c.GetProjectGroupMember(ctx, "1", "platform-admins")
+	if err != nil || st2 == nil {
+		t.Fatalf("GetProjectGroupMember after update: st=%v err=%v", st2, err)
+	}
+	if st2.Role != "maintainer" {
+		t.Errorf("expected role maintainer after update, got %q", st2.Role)
+	}
+
+	// nil groupType -> defaults to OIDC (3).
+	if err := c.AddProjectGroupMember(ctx, "1", "default-type-group", nil, "guest"); err != nil {
+		t.Fatalf("AddProjectGroupMember default type: %v", err)
+	}
+	if *lastGroupType != 3 {
+		t.Errorf("expected default group_type 3 when nil, got %d", *lastGroupType)
+	}
+
+	// Delete -> gone, idempotent.
+	if err := c.DeleteProjectGroupMember(ctx, "1", "platform-admins"); err != nil {
+		t.Fatalf("DeleteProjectGroupMember: %v", err)
+	}
+	if st, err := c.GetProjectGroupMember(ctx, "1", "platform-admins"); err != nil || st != nil {
+		t.Fatalf("expected (nil,nil) after delete, got st=%v err=%v", st, err)
+	}
+	if err := c.DeleteProjectGroupMember(ctx, "1", "platform-admins"); err != nil {
+		t.Fatalf("idempotent DeleteProjectGroupMember: %v", err)
 	}
 }

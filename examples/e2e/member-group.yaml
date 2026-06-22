@@ -1,0 +1,32 @@
+apiVersion: project.harbor.m.crossplane.io/v1beta1
+kind: Project
+metadata:
+  name: uptest-member-group-proj
+  namespace: uptest
+  annotations:
+    meta.upbound.io/example-id: harbor/v1beta1/project
+spec:
+  forProvider:
+    name: uptest-member-group-proj
+    public: false
+  providerConfigRef:
+    kind: ProviderConfig
+    name: harbor-e2e
+---
+apiVersion: member.harbor.m.crossplane.io/v1beta1
+kind: Member
+metadata:
+  name: uptest-member-group
+  namespace: uptest
+  annotations:
+    meta.upbound.io/example-id: harbor/v1beta1/member
+spec:
+  forProvider:
+    projectId: uptest-member-group-proj
+    # A group member (e.g. a Keycloak/OIDC group) rather than a user.
+    groupName: uptest-group
+    memberGroupType: 3 # OIDC
+    role: developer
+  providerConfigRef:
+    kind: ProviderConfig
+    name: harbor-e2e

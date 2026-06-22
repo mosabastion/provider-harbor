@@ -83,7 +83,13 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotMember)
 	}
 
-	status, err := c.service.GetProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
+	var status *harborclients.MemberStatus
+	var err error
+	if isGroupMember(cr) {
+		status, err = c.service.GetProjectGroupMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.GroupName)
+	} else {
+		status, err = c.service.GetProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
+	}
 	if err != nil {
 		// A real failure must surface, not be treated as "absent" (which would
 		// spuriously re-add the member).
@@ -118,7 +124,12 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	cr.SetConditions(xpv1.Creating())
 
-	err := c.service.AddProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
+	var err error
+	if isGroupMember(cr) {
+		err = c.service.AddProjectGroupMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.GroupName, cr.Spec.ForProvider.MemberGroupType, cr.Spec.ForProvider.Role)
+	} else {
+		err = c.service.AddProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
+	}
 	if err != nil {
 		return managed.ExternalCreation{}, err
 	}
@@ -132,7 +143,12 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.New(errNotMember)
 	}
 
-	err := c.service.UpdateProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
+	var err error
+	if isGroupMember(cr) {
+		err = c.service.UpdateProjectGroupMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.GroupName, cr.Spec.ForProvider.Role)
+	} else {
+		err = c.service.UpdateProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username, cr.Spec.ForProvider.Role)
+	}
 	if err != nil {
 		return managed.ExternalUpdate{}, err
 	}
@@ -148,7 +164,12 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	cr.SetConditions(xpv1.Deleting())
 
-	err := c.service.DeleteProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
+	var err error
+	if isGroupMember(cr) {
+		err = c.service.DeleteProjectGroupMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.GroupName)
+	} else {
+		err = c.service.DeleteProjectMember(ctx, cr.Spec.ForProvider.ProjectID, cr.Spec.ForProvider.Username)
+	}
 	if err != nil {
 		return managed.ExternalDelete{}, errors.Wrap(err, errMemberDelete)
 	}
@@ -158,4 +179,10 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 
 func (c *external) Disconnect(ctx context.Context) error {
 	return c.service.Close()
+}
+
+// isGroupMember reports whether the Member models a group member (groupName set)
+// rather than a user member (username set). The XOR is enforced at admission.
+func isGroupMember(cr *v1beta1.Member) bool {
+	return cr.Spec.ForProvider.GroupName != ""
 }
