@@ -9,7 +9,9 @@
 set -aeuo pipefail
 : "${KUBECTL:=kubectl}"
 NS="${UPTEST_NAMESPACE:-uptest}"
-HARBOR_URL="${HARBOR_URL:-http://harbor.harbor.svc}"
+# e2e.sh exports HARBOR_HOST as "<release>-core.<ns>.svc; fall back for standalone runs.
+HARBOR_HOST="${HARBOR_HOST:-my-harbor-core.harbor.svc}"
+HARBOR_URL="http://${HARBOR_HOST}"
 HARBOR_PASSWORD="${HARBOR_PASSWORD:-Harbor12345}"
 IMAGES_PROJECT="${IMAGES_PROJECT:-uptest-images}"
 
@@ -21,8 +23,9 @@ ${KUBECTL} -n "$NS" create secret generic harbor-creds \
 ${KUBECTL} -n "$NS" create secret generic user-password \
   --from-literal=password='Uptest-User-123' \
   --dry-run=client -o yaml | ${KUBECTL} apply -f -
+# ProviderConfig lives in harbor.crossplane.io (not .m.) — same as ProviderConfigUsage.
 cat <<YAML | ${KUBECTL} apply -f -
-apiVersion: harbor.m.crossplane.io/v1beta1
+apiVersion: harbor.crossplane.io/v1beta1
 kind: ProviderConfig
 metadata:
   name: harbor-e2e
@@ -54,7 +57,7 @@ spec:
           # gcr mirror avoids Docker Hub anonymous pull-rate limits in CI.
           image: mirror.gcr.io/library/alpine:3.20
           env:
-            - {name: HARBOR, value: "harbor.harbor.svc"}
+            - {name: HARBOR, value: "${HARBOR_HOST}"}
             - {name: PW, value: "${HARBOR_PASSWORD}"}
             - {name: PROJECT, value: "${IMAGES_PROJECT}"}
           command: ["/bin/sh", "-c"]

@@ -151,6 +151,8 @@ LIST="$(ls examples/e2e/*.yaml | paste -sd, -)"
 
 rc=0
 KUBECTL="$(command -v kubectl)" CHAINSAW="$CHAINSAW" E2E_NS="$E2E_NS" \
+  HARBOR_HOST="${HARBOR_RELEASE}-core.${HARBOR_NS}.svc" \
+  HARBOR_PASSWORD="$HARBOR_PASSWORD" \
   "$UPTEST" e2e "$LIST" \
   --setup-script="test/e2e/uptest-setup.sh" \
   --default-conditions=Ready --skip-update --default-timeout=600s || rc=$?
