@@ -4,7 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: robots.robot.harbor.m.crossplane.io
+  name: robots.harbor.m.crossplane.io
 spec:
   group: harbor.m.crossplane.io
   names:
