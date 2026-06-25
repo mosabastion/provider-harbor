@@ -113,12 +113,15 @@ spec:
 EOF
 log "waiting for Installed + Healthy"
 heal=""
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   heal="$(kubectl get provider.pkg "$PROVIDER" -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || true)"
   [ "$heal" = "True" ] && break
   sleep 5
 done
-[ "$heal" = "True" ] || die "provider did not become Healthy"
+if [ "$heal" != "True" ]; then
+  kubectl describe provider.pkg "$PROVIDER" 2>/dev/null || true
+  die "provider did not become Healthy"
+fi
 want="$(ls package/crds/*.yaml | wc -l | tr -d ' ')"
 got="$(kubectl get crd -o name 2>/dev/null | grep -c 'harbor' || true)"
 [ "$got" -eq "$want" ] || die "provider Healthy but only ${got}/${want} harbor CRDs registered — a CRD failed to install"

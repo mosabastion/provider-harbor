@@ -77,4 +77,12 @@ ${KUBECTL} -n "$NS" wait --for=condition=complete job/seed-image --timeout=300s
 
 echo "uptest-setup: waiting until provider is healthy"
 ${KUBECTL} wait provider.pkg --all --for condition=Healthy --timeout 5m
+
+# Wait for MR CRDs to be Established before applying any resources. Crossplane
+# can report Healthy slightly ahead of the apiserver's discovery cache refresh.
+echo "uptest-setup: waiting for MR CRDs to be Established"
+${KUBECTL} wait --for=condition=Established \
+  crd/projects.harbor.m.crossplane.io \
+  crd/users.harbor.m.crossplane.io \
+  --timeout 60s
 echo "uptest-setup: done"
