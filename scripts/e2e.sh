@@ -2,8 +2,9 @@
 # Self-contained e2e for provider-harbor on KIND with a REAL Harbor.
 #
 # Stands up (idempotently): a kind cluster -> Crossplane -> Harbor (goharbor
-# Helm chart, in-cluster, no TLS/persistence) -> the provider package -> then
-# runs uptest (apply -> Ready -> delete) over examples/e2e/*.
+# Helm chart, in-cluster, no TLS/persistence) -> the provider package (built
+# locally) -> then runs uptest (apply -> Ready -> import -> delete) over
+# examples/e2e/*.
 #
 # Runs uptest v2 (namespaced-aware): apply -> Ready -> import -> delete. The
 # import step (delete local state, re-observe the real external resource) works
@@ -11,32 +12,19 @@
 # skipped — it needs per-example uptest.upbound.io/update-parameter annotations;
 # drift/observe-rematch logic is otherwise covered by the unit tests.
 #
-# Env knobs:
-#   KIND_CLUSTER (harbor-e2e)  REGISTRY (ghcr.io/mosabastion)  PROVIDER (provider-harbor)
-#   VERSION (required: a published package tag, e.g. v0.17.0-spike.13)
-#   HARBOR_PASSWORD (Harbor12345)  GHCR_USER / GHCR_TOKEN (for private pull)
-#   KEEP (set to keep the cluster after the run)
-set -euo pipefail
-
-KIND_CLUSTER="${KIND_CLUSTER:-harbor-e2e}"
-REGISTRY="${REGISTRY:-ghcr.io/mosabastion}"
-PROVIDER="${PROVIDER:-provider-harbor}"
-VERSION="${VERSION:?set VERSION to a published package tag, e.g. v0.17.0-spike.13}"
-HARBOR_PASSWORD="${HARBOR_PASSWORD:-Harbor12345}"
-IMAGE="${IMAGE:-${REGISTRY}/${PROVIDER}}"
-KCTX="kind-${KIND_CLUSTER}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
-k() { kubectl --context "$KCTX" "$@"; }
-
-require() { for c in "$@"; do command -v "$c" >/dev/null || { echo "missing: $c"; exit 1; }; done; }
-require kind kubectl helm
+# Env knobs (optional, defaults from scripts/lib.sh):
+#   KIND_CLUSTER (provider-harbor-dev)  PROVIDER (provider-harbor)
+#   E2E_NS (provider-harbor-e2e)  KEEP (set to keep the kind cluster afterwards)
+#   HARBOR_PASSWORD (Harbor12345)
+source "$(dirname "$0")/lib.sh"
+require_cmd kind kubectl helm go docker
 CHAINSAW="${CHAINSAW:-$(command -v chainsaw || true)}"
-[ -n "$CHAINSAW" ] || { echo "missing: chainsaw"; exit 1; }
-# uptest v2 (namespaced-aware) is NOT `go install`-able — its go.mod has an
-# exclude directive, which `go install pkg@version` rejects — so fetch the
-# released binary. Cached by version so a pin bump just downloads a new file.
+[ -n "$CHAINSAW" ] || die "required command not found: chainsaw"
+KCTX="kind-${KIND_CLUSTER}"
+E2E_NS="${E2E_NS:-provider-harbor-e2e}"
+HARBOR_PASSWORD="${HARBOR_PASSWORD:-Harbor12345}"
+cd "$ROOT" || die "cannot cd to repo root $ROOT"
+
 UPTEST_VERSION="${UPTEST_VERSION:-v2.2.0}"
 UPTEST="${UPTEST:-$(go env GOPATH)/bin/uptest-${UPTEST_VERSION}}"
 if [ ! -x "$UPTEST" ]; then
@@ -45,71 +33,124 @@ if [ ! -x "$UPTEST" ]; then
   chmod +x "$UPTEST"
 fi
 
-log "ensure kind cluster ${KIND_CLUSTER}"
-kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER" || kind create cluster --name "$KIND_CLUSTER"
+# 1. kind + Crossplane (idempotent).
+"${ROOT}/scripts/cluster-up.sh"
 
-log "install Crossplane"
-helm repo add crossplane-stable https://charts.crossplane.io/stable >/dev/null 2>&1 || true
-helm repo update crossplane-stable >/dev/null 2>&1
-helm --kube-context "$KCTX" upgrade --install crossplane crossplane-stable/crossplane \
-  -n crossplane-system --create-namespace --wait --timeout 5m >/dev/null
+ORIG_CTX="$(kubectl config current-context 2>/dev/null || true)"
+cleanup() {
+  if [ "${KEEP:-false}" != "true" ]; then
+    log "deleting kind cluster ${KIND_CLUSTER}"
+    kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
+    docker rm -f "${REG_NAME:-provider-harbor-e2e-registry}" >/dev/null 2>&1 || true
+  fi
+  [ -n "$ORIG_CTX" ] && kubectl config use-context "$ORIG_CTX" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+kubectl config use-context "$KCTX" >/dev/null
 
-log "install Harbor (in-cluster, no TLS/persistence)"
-helm repo add harbor https://helm.goharbor.io >/dev/null 2>&1 || true
-helm repo update harbor >/dev/null 2>&1
-k create namespace harbor --dry-run=client -o yaml | k apply -f - >/dev/null
-helm --kube-context "$KCTX" upgrade --install my-harbor harbor/harbor -n harbor \
-  --set expose.type=clusterIP --set expose.tls.enabled=false \
-  --set externalURL=http://harbor.harbor.svc --set persistence.enabled=false \
-  --set harborAdminPassword="$HARBOR_PASSWORD" --set trivy.enabled=true \
-  --set jobservice.replicas=1 --wait --timeout 10m >/dev/null
-
-log "install provider ${IMAGE}:${VERSION}"
-PULL_REF=""
-if [ "${PRIVATE:-true}" = "true" ]; then
-  TOKEN="${GHCR_TOKEN:-$(gh auth token 2>/dev/null || true)}"
-  USER="${GHCR_USER:-$(gh api user -q .login 2>/dev/null || echo x)}"
-  [ -n "$TOKEN" ] || { echo "no GHCR token (export GHCR_TOKEN or 'gh auth refresh -s read:packages')"; exit 1; }
-  k create secret docker-registry ghcr-pull -n crossplane-system \
-    --docker-server=ghcr.io --docker-username="$USER" --docker-password="$TOKEN" \
-    --dry-run=client -o yaml | k apply -f - >/dev/null
-  PULL_REF=$'\n  packagePullSecrets:\n    - name: ghcr-pull'
+# 2. build the xpkg locally and serve from a throwaway local OCI registry.
+REG_NAME="${REG_NAME:-provider-harbor-e2e-registry}"
+REG_PORT="${REG_PORT:-5001}"
+if [ -z "$(docker ps -q -f "name=^${REG_NAME}$")" ]; then
+  log "starting local registry ${REG_NAME} on :${REG_PORT}"
+  docker run -d --restart=always -p "127.0.0.1:${REG_PORT}:5000" --name "$REG_NAME" registry:2 >/dev/null
 fi
-cat <<EOF | k apply -f -
+REG_HOST="${REG_HOST:-registry.e2e.local}"
+docker network connect kind "$REG_NAME" 2>/dev/null || true
+REG_IP="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$REG_NAME")"
+[ -n "$REG_IP" ] || die "could not determine ${REG_NAME} IP on the kind network"
+PUSH_REF="localhost:${REG_PORT}/${PROVIDER}:e2e"
+REG_REF="${REG_HOST}:5000/${PROVIDER}:e2e"
+
+log "pointing kind node containerd at ${REG_HOST}:5000 (plain http) + /etc/hosts"
+for node in $(kind get nodes --name "$KIND_CLUSTER"); do
+  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REG_HOST}:5000"
+  cat <<HOSTS | docker exec -i "$node" cp /dev/stdin "/etc/containerd/certs.d/${REG_HOST}:5000/hosts.toml"
+[host."http://${REG_HOST}:5000"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+HOSTS
+  docker exec "$node" sh -c "grep -q ' ${REG_HOST}\$' /etc/hosts || echo '${REG_IP} ${REG_HOST}' >> /etc/hosts"
+done
+
+log "adding ${REG_HOST} -> ${REG_IP} to CoreDNS (for the in-Pod digest resolve)"
+CURRENT_CF="$(kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
+if ! grep -q "$REG_HOST" <<<"$CURRENT_CF"; then
+  NEW_CF="$(CURRENT_CF="$CURRENT_CF" REG_IP="$REG_IP" REG_HOST="$REG_HOST" python3 - <<'PY'
+import os, sys
+cf = os.environ["CURRENT_CF"]
+block = "    hosts {\n        %s %s\n        fallthrough\n    }\n" % (os.environ["REG_IP"], os.environ["REG_HOST"])
+out, done = [], False
+for line in cf.splitlines(keepends=True):
+    out.append(line)
+    if not done and line.strip().startswith(".:53 {"):
+        out.append(block); done = True
+sys.stdout.write("".join(out))
+PY
+)"
+  [ -n "$NEW_CF" ] || die "failed to build patched Corefile"
+  kubectl -n kube-system create configmap coredns --from-literal=Corefile="$NEW_CF" \
+    --dry-run=client -o yaml | kubectl -n kube-system apply -f -
+  kubectl -n kube-system rollout restart deploy/coredns
+  kubectl -n kube-system rollout status deploy/coredns --timeout=120s
+fi
+
+XPKG="$("${ROOT}/scripts/build-xpkg.sh" amd64)"
+"${ROOT}/scripts/verify-xpkg.sh" "$XPKG"
+log "pushing package to ${PUSH_REF} (pulled in-cluster as ${REG_REF})"
+CRANK="$(ensure_crossplane_cli)"
+CLEAN_DOCKER_CFG="$(mktemp -d)"
+echo '{}' > "${CLEAN_DOCKER_CFG}/config.json"
+DOCKER_CONFIG="$CLEAN_DOCKER_CFG" "$CRANK" xpkg push -f "$XPKG" "$PUSH_REF"
+rm -rf "$CLEAN_DOCKER_CFG"
+cat <<EOF | kubectl apply -f -
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
   name: ${PROVIDER}
 spec:
-  package: ${IMAGE}:${VERSION}${PULL_REF}
+  package: ${REG_REF}
 EOF
-log "wait provider Healthy"
-for i in $(seq 1 60); do
-  [ "$(k get provider.pkg "$PROVIDER" -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null)" = "True" ] && break
+log "waiting for Installed + Healthy"
+heal=""
+for _ in $(seq 1 30); do
+  heal="$(kubectl get provider.pkg "$PROVIDER" -o jsonpath='{.status.conditions[?(@.type=="Healthy")].status}' 2>/dev/null || true)"
+  [ "$heal" = "True" ] && break
   sleep 5
 done
-n="$(k get crd -o name 2>/dev/null | grep -c 'harbor.m.crossplane.io' || true)"
-[ "$n" -gt 0 ] || { echo "provider Healthy but $n CRDs registered — packaging broken"; exit 1; }
-log "provider Healthy, ${n} CRDs"
+[ "$heal" = "True" ] || die "provider did not become Healthy"
+want="$(ls package/crds/*.yaml | wc -l | tr -d ' ')"
+got="$(kubectl get crd -o name 2>/dev/null | grep -c 'harbor' || true)"
+[ "$got" -eq "$want" ] || die "provider Healthy but only ${got}/${want} harbor CRDs registered — a CRD failed to install"
+ok "installed: Healthy + ${got}/${want} CRDs registered"
 
-log "run uptest e2e (apply -> Ready -> delete)"
-cd "$ROOT"   # uptest resolves manifest paths relative to cwd
-LIST="$(cd "$ROOT" && ls examples/e2e/*.yaml | paste -sd, -)"
-# uptest + chainsaw use the *current* kubectl context; point it at the kind
-# cluster and restore the caller's context on exit.
-ORIG_CTX="$(kubectl config current-context 2>/dev/null || true)"
-restore_ctx() { [ -n "$ORIG_CTX" ] && kubectl config use-context "$ORIG_CTX" >/dev/null 2>&1 || true; }
-trap restore_ctx EXIT
-kubectl config use-context "$KCTX" >/dev/null
+# 3. install a REAL Harbor (goharbor Helm chart, in-cluster, no TLS/persistence).
+HARBOR_NS="${HARBOR_NS:-harbor}"
+HARBOR_RELEASE="${HARBOR_RELEASE:-my-harbor}"
+log "installing Harbor (harbor/harbor) in ns ${HARBOR_NS}"
+helm repo add harbor https://helm.goharbor.io >/dev/null 2>&1 || true
+helm repo update harbor >/dev/null 2>&1
+kubectl create namespace "$HARBOR_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+helm upgrade --install "$HARBOR_RELEASE" harbor/harbor -n "$HARBOR_NS" \
+  --set expose.type=clusterIP --set expose.tls.enabled=false \
+  --set externalURL="http://${HARBOR_RELEASE}-core.${HARBOR_NS}.svc" \
+  --set persistence.enabled=false \
+  --set harborAdminPassword="$HARBOR_PASSWORD" \
+  --set trivy.enabled=false \
+  --set jobservice.replicas=1 \
+  --wait --timeout 10m >/dev/null
+kubectl -n "$HARBOR_NS" rollout status deploy/"${HARBOR_RELEASE}-core" --timeout=300s
+ok "Harbor ready at ${HARBOR_RELEASE}-core.${HARBOR_NS}.svc:80 (admin Harbor12345)"
+
+# 4. run uptest over the examples (apply -> Ready -> import -> delete).
+log "running uptest e2e against the real Harbor backend"
+LIST="$(ls examples/e2e/*.yaml | paste -sd, -)"
 
 rc=0
-KUBECTL=$(command -v kubectl) CHAINSAW="$CHAINSAW" \
+KUBECTL="$(command -v kubectl)" CHAINSAW="$CHAINSAW" E2E_NS="$E2E_NS" \
   "$UPTEST" e2e "$LIST" \
-  --setup-script="$ROOT/test/e2e/uptest-setup.sh" \
+  --setup-script="test/e2e/uptest-setup.sh" \
   --default-conditions=Ready --skip-update --default-timeout=600s || rc=$?
 
-if [ -z "${KEEP:-}" ]; then
-  log "delete kind cluster ${KIND_CLUSTER}"
-  kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
-fi
+[ "$rc" -eq 0 ] && ok "e2e PASSED" || warn "e2e FAILED (rc=$rc) — re-run with KEEP=true to inspect"
 exit $rc
