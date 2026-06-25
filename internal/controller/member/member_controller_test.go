@@ -18,83 +18,84 @@ import (
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
 )
 
+// ptrString returns a pointer to the given string value.
+func ptrString(s string) *string { return &s }
+
+// ptrInt64 returns a pointer to the given int64 value.
+func ptrInt64(i int64) *int64 { return &i }
+
+// newUserMember returns a Member CR with type=user and the given username.
+func newUserMember(username, role string) *v1beta1.Member {
+	return &v1beta1.Member{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-member", Namespace: "default"},
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{
+				ProjectID: "project-1",
+				Type:      "user",
+				Username:  ptrString(username),
+				Role:      role,
+			},
+		},
+	}
+}
+
+// ---- nil-check guards -------------------------------------------------------
+
 func TestConnectNotMember(t *testing.T) {
 	ctx := context.Background()
-	conn := &connector{}
-
-	_, err := conn.Connect(ctx, nil)
+	_, err := (&connector{}).Connect(ctx, nil)
 	if err == nil || err.Error() != errNotMember {
-		t.Errorf("Connect with nil should return %s error", errNotMember)
+		t.Errorf("expected %q error, got %v", errNotMember, err)
 	}
 }
 
 func TestObserveNotMember(t *testing.T) {
 	ctx := context.Background()
-	ext := &external{}
-
-	_, err := ext.Observe(ctx, nil)
+	_, err := (&external{}).Observe(ctx, nil)
 	if err == nil || err.Error() != errNotMember {
-		t.Errorf("Observe with nil should return %s error", errNotMember)
-	}
-}
-
-func TestUpdateNotMember(t *testing.T) {
-	ctx := context.Background()
-	ext := &external{}
-
-	_, err := ext.Update(ctx, nil)
-	if err == nil || err.Error() != errNotMember {
-		t.Errorf("Update with nil should return %s error", errNotMember)
-	}
-}
-
-func TestDeleteNotMember(t *testing.T) {
-	ctx := context.Background()
-	ext := &external{}
-
-	_, err := ext.Delete(ctx, nil)
-	if err == nil || err.Error() != errNotMember {
-		t.Errorf("Delete with nil should return %s error", errNotMember)
+		t.Errorf("expected %q error, got %v", errNotMember, err)
 	}
 }
 
 func TestCreateNotMember(t *testing.T) {
 	ctx := context.Background()
-	ext := &external{}
-
-	_, err := ext.Create(ctx, nil)
+	_, err := (&external{}).Create(ctx, nil)
 	if err == nil || err.Error() != errNotMember {
-		t.Errorf("Create with nil should return %s error", errNotMember)
+		t.Errorf("expected %q error, got %v", errNotMember, err)
 	}
 }
 
+func TestUpdateNotMember(t *testing.T) {
+	ctx := context.Background()
+	_, err := (&external{}).Update(ctx, nil)
+	if err == nil || err.Error() != errNotMember {
+		t.Errorf("expected %q error, got %v", errNotMember, err)
+	}
+}
+
+func TestDeleteNotMember(t *testing.T) {
+	ctx := context.Background()
+	_, err := (&external{}).Delete(ctx, nil)
+	if err == nil || err.Error() != errNotMember {
+		t.Errorf("expected %q error, got %v", errNotMember, err)
+	}
+}
+
+// ---- Observe (name-based path: no external-name set) -----------------------
+
 func TestObserveMemberNotFound(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
 
-	// Not-found is the (nil, nil) contract — not an error. Observe must report the
-	// member absent so Crossplane creates it, without surfacing a failure.
-	ext := &external{
-		service: &mockMemberClient{
-			getProjectMemberFunc: func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-				return nil, nil
-			},
+	ext := &external{service: &mockMemberClient{
+		findProjectMemberFunc: func(_ context.Context, _, _, _ string) (*harborclients.MemberStatus, error) {
+			return nil, nil
 		},
-	}
+	}}
 
-	obs, err := ext.Observe(ctx, member)
+	obs, err := ext.Observe(ctx, cr)
 	if err != nil {
-		t.Errorf("Observe should not fail on not-found, got %v", err)
+		t.Fatalf("Observe returned error on not-found: %v", err)
 	}
 	if obs.ResourceExists {
 		t.Error("ResourceExists should be false when member not found")
@@ -103,366 +104,309 @@ func TestObserveMemberNotFound(t *testing.T) {
 
 func TestObserveMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-member"},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{ProjectID: "project-1", Username: "testuser"},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
 
-	// A real failure (auth/network/5xx) must surface, not be treated as absent.
-	ext := &external{
-		service: &mockMemberClient{
-			getProjectMemberFunc: func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-				return nil, errors.New("boom")
-			},
+	ext := &external{service: &mockMemberClient{
+		findProjectMemberFunc: func(_ context.Context, _, _, _ string) (*harborclients.MemberStatus, error) {
+			return nil, errors.New("boom")
 		},
-	}
+	}}
 
-	if _, err := ext.Observe(ctx, member); err == nil {
+	if _, err := ext.Observe(ctx, cr); err == nil {
 		t.Error("Observe should surface a real client error")
 	}
 }
 
-func TestObserveMemberExists(t *testing.T) {
+func TestObserveMemberExistsByName(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
 
-	ext := &external{
-		service: &mockMemberClient{
-			getProjectMemberFunc: func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-				return &harborclients.MemberStatus{
-					ID:           "member-123",
-					MemberName:   "testuser",
-					MemberType:   "u",
-					Role:         "admin",
-					CreationTime: time.Now(),
-				}, nil
-			},
+	ext := &external{service: &mockMemberClient{
+		findProjectMemberFunc: func(_ context.Context, _, _, _ string) (*harborclients.MemberStatus, error) {
+			return &harborclients.MemberStatus{
+				ID:           "42",
+				MemberName:   "testuser",
+				MemberType:   "u",
+				Role:         "developer",
+				CreationTime: time.Now(),
+			}, nil
 		},
-	}
+	}}
 
-	obs, err := ext.Observe(ctx, member)
+	obs, err := ext.Observe(ctx, cr)
 	if err != nil {
-		t.Errorf("Observe should not fail, got %v", err)
+		t.Fatalf("Observe error: %v", err)
 	}
 	if !obs.ResourceExists {
 		t.Error("ResourceExists should be true")
 	}
 	if !obs.ResourceUpToDate {
-		t.Error("ResourceUpToDate should be true when role matches")
+		t.Error("ResourceUpToDate should be true when roles match")
 	}
-	// crossplane-runtime v2 no longer sets Available() for us; the controller must.
-	if member.GetCondition(xpv1.TypeReady).Status != corev1.ConditionTrue {
-		t.Error("Ready condition should be True (Available) for an up-to-date member")
+	// crossplane-runtime v2 requires the controller to call Available() itself.
+	if cr.GetCondition(xpv1.TypeReady).Status != corev1.ConditionTrue {
+		t.Error("Ready condition should be True (Available) after Observe")
 	}
 }
 
 func TestObserveMemberNotUpToDate(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "admin")
 
-	ext := &external{
-		service: &mockMemberClient{
-			getProjectMemberFunc: func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-				return &harborclients.MemberStatus{
-					ID:           "member-123",
-					MemberName:   "testuser",
-					MemberType:   "u",
-					Role:         "developer",
-					CreationTime: time.Now(),
-				}, nil
-			},
+	ext := &external{service: &mockMemberClient{
+		findProjectMemberFunc: func(_ context.Context, _, _, _ string) (*harborclients.MemberStatus, error) {
+			return &harborclients.MemberStatus{
+				ID: "42", MemberName: "testuser", MemberType: "u", Role: "developer",
+			}, nil
 		},
-	}
+	}}
 
-	obs, err := ext.Observe(ctx, member)
+	obs, err := ext.Observe(ctx, cr)
 	if err != nil {
-		t.Errorf("Observe should not fail, got %v", err)
+		t.Fatalf("Observe error: %v", err)
 	}
 	if !obs.ResourceExists {
 		t.Error("ResourceExists should be true")
 	}
 	if obs.ResourceUpToDate {
-		t.Error("ResourceUpToDate should be false when role differs")
+		t.Error("ResourceUpToDate should be false when roles differ")
 	}
 }
 
-func TestObserveMemberNoRoleInSpec(t *testing.T) {
+// ---- Observe (id-based path: external-name already set) --------------------
+
+func TestObserveMemberByID(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
 
-	ext := &external{
-		service: &mockMemberClient{
-			getProjectMemberFunc: func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-				return &harborclients.MemberStatus{
-					ID:           "member-123",
-					MemberName:   "testuser",
-					MemberType:   "u",
-					Role:         "developer",
-					CreationTime: time.Now(),
-				}, nil
-			},
+	ext := &external{service: &mockMemberClient{
+		getProjectMemberByIDFunc: func(_ context.Context, _, _ string) (*harborclients.MemberStatus, error) {
+			return &harborclients.MemberStatus{
+				ID: "42", MemberName: "testuser", MemberType: "u", Role: "developer",
+			}, nil
 		},
-	}
+	}}
 
-	obs, err := ext.Observe(ctx, member)
+	obs, err := ext.Observe(ctx, cr)
 	if err != nil {
-		t.Errorf("Observe should not fail, got %v", err)
+		t.Fatalf("Observe error: %v", err)
 	}
 	if !obs.ResourceExists {
 		t.Error("ResourceExists should be true")
 	}
-	if !obs.ResourceUpToDate {
-		t.Error("ResourceUpToDate should be true when no role specified in spec")
+}
+
+func TestObserveMemberByIDNotFound(t *testing.T) {
+	ctx := context.Background()
+	cr := newUserMember("testuser", "developer")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
+
+	ext := &external{service: &mockMemberClient{
+		getProjectMemberByIDFunc: func(_ context.Context, _, _ string) (*harborclients.MemberStatus, error) {
+			return nil, nil
+		},
+	}}
+
+	obs, err := ext.Observe(ctx, cr)
+	if err != nil {
+		t.Fatalf("Observe error: %v", err)
+	}
+	if obs.ResourceExists {
+		t.Error("ResourceExists should be false when member not found by ID")
 	}
 }
 
-func TestCreateMemberSuccess(t *testing.T) {
+// ---- Create ----------------------------------------------------------------
+
+func TestCreateUserMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
 
-	ext := &external{
-		service: &mockMemberClient{
-			addProjectMemberFunc: func(ctx context.Context, projectID, username, role string) error {
-				return nil
-			},
+	ext := &external{service: &mockMemberClient{
+		addProjectUserMemberFunc: func(_ context.Context, _, _, _ string) (string, error) {
+			return "42", nil
 		},
-	}
+	}}
 
-	_, err := ext.Create(ctx, member)
-	if err != nil {
+	if _, err := ext.Create(ctx, cr); err != nil {
 		t.Errorf("Create should not fail, got %v", err)
 	}
 }
 
-func TestCreateMemberError(t *testing.T) {
+func TestCreateUserMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
 
-	ext := &external{
-		service: &mockMemberClient{
-			addProjectMemberFunc: func(ctx context.Context, projectID, username, role string) error {
-				return errors.New("create failed")
-			},
+	ext := &external{service: &mockMemberClient{
+		addProjectUserMemberFunc: func(_ context.Context, _, _, _ string) (string, error) {
+			return "", errors.New("create failed")
 		},
-	}
+	}}
 
-	_, err := ext.Create(ctx, member)
-	if err == nil {
+	if _, err := ext.Create(ctx, cr); err == nil {
 		t.Error("Create should fail when client fails")
 	}
 }
 
-func TestUpdateMemberSuccess(t *testing.T) {
+func TestCreateGroupMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
+	cr := &v1beta1.Member{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-member", Namespace: "default"},
 		Spec: v1beta1.MemberSpec{
 			ForProvider: v1beta1.MemberParameters{
 				ProjectID: "project-1",
-				Username:  "testuser",
+				Type:      "group",
+				GroupName: ptrString("devs"),
+				GroupType: ptrInt64(2),
 				Role:      "developer",
 			},
 		},
 	}
 
-	ext := &external{
-		service: &mockMemberClient{
-			updateProjectMemberFunc: func(ctx context.Context, projectID, username, role string) error {
-				return nil
+	ext := &external{service: &mockMemberClient{
+		addProjectGroupMemberFunc: func(_ context.Context, _, _ string, _ int64, _ string) (string, error) {
+			return "43", nil
+		},
+	}}
+
+	if _, err := ext.Create(ctx, cr); err != nil {
+		t.Errorf("Create group member should not fail, got %v", err)
+	}
+}
+
+func TestCreateUnknownTypeError(t *testing.T) {
+	ctx := context.Background()
+	cr := &v1beta1.Member{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-member"},
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{
+				ProjectID: "project-1",
+				Type:      "robot",
+				Role:      "developer",
 			},
 		},
 	}
 
-	_, err := ext.Update(ctx, member)
-	if err != nil {
+	if _, err := (&external{service: &mockMemberClient{}}).Create(ctx, cr); err == nil {
+		t.Error("Create with unknown type should return error")
+	}
+}
+
+// ---- Update ----------------------------------------------------------------
+
+func TestUpdateMemberSuccess(t *testing.T) {
+	ctx := context.Background()
+	cr := newUserMember("testuser", "admin")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
+
+	ext := &external{service: &mockMemberClient{
+		updateProjectMemberByIDFunc: func(_ context.Context, _, _, _ string) error { return nil },
+	}}
+
+	if _, err := ext.Update(ctx, cr); err != nil {
 		t.Errorf("Update should not fail, got %v", err)
 	}
 }
 
 func TestUpdateMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "developer",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "admin")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
 
-	ext := &external{
-		service: &mockMemberClient{
-			updateProjectMemberFunc: func(ctx context.Context, projectID, username, role string) error {
-				return errors.New("update failed")
-			},
+	ext := &external{service: &mockMemberClient{
+		updateProjectMemberByIDFunc: func(_ context.Context, _, _, _ string) error {
+			return errors.New("update failed")
 		},
-	}
+	}}
 
-	_, err := ext.Update(ctx, member)
-	if err == nil {
+	if _, err := ext.Update(ctx, cr); err == nil {
 		t.Error("Update should fail when client fails")
 	}
 }
 
+func TestUpdateMemberMissingID(t *testing.T) {
+	ctx := context.Background()
+	cr := newUserMember("testuser", "admin")
+	// No external-name annotation → memberID returns ""
+
+	if _, err := (&external{service: &mockMemberClient{}}).Update(ctx, cr); err == nil {
+		t.Error("Update should fail when member id is not known yet")
+	}
+}
+
+// ---- Delete ----------------------------------------------------------------
+
 func TestDeleteMemberSuccess(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
 
-	ext := &external{
-		service: &mockMemberClient{
-			deleteProjectMemberFunc: func(ctx context.Context, projectID, username string) error {
-				return nil
-			},
-		},
-	}
+	ext := &external{service: &mockMemberClient{
+		deleteProjectMemberByIDFunc: func(_ context.Context, _, _ string) error { return nil },
+	}}
 
-	_, err := ext.Delete(ctx, member)
-	if err != nil {
+	if _, err := ext.Delete(ctx, cr); err != nil {
 		t.Errorf("Delete should not fail, got %v", err)
 	}
 }
 
 func TestDeleteMemberError(t *testing.T) {
 	ctx := context.Background()
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-			},
-		},
-	}
+	cr := newUserMember("testuser", "developer")
+	cr.Annotations = map[string]string{"crossplane.io/external-name": "42"}
 
-	ext := &external{
-		service: &mockMemberClient{
-			deleteProjectMemberFunc: func(ctx context.Context, projectID, username string) error {
-				return errors.New("delete failed")
-			},
+	ext := &external{service: &mockMemberClient{
+		deleteProjectMemberByIDFunc: func(_ context.Context, _, _ string) error {
+			return errors.New("delete failed")
 		},
-	}
+	}}
 
-	_, err := ext.Delete(ctx, member)
-	if err == nil {
+	if _, err := ext.Delete(ctx, cr); err == nil {
 		t.Error("Delete should fail when client fails")
 	}
 }
 
-func TestMemberHasRequiredFields(t *testing.T) {
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-member",
-			Namespace: "default",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
-	}
+func TestDeleteMemberNoIDIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	cr := newUserMember("testuser", "developer")
+	// No external-name → memberID returns "" → Delete is a no-op
 
-	if member.Spec.ForProvider.ProjectID == "" {
-		t.Error("Member ProjectID should not be empty")
+	if _, err := (&external{service: &mockMemberClient{}}).Delete(ctx, cr); err != nil {
+		t.Errorf("Delete with unknown id should be a no-op, got %v", err)
 	}
-	if member.Spec.ForProvider.Username == "" {
-		t.Error("Member Username should not be empty")
+}
+
+// ---- Disconnect ------------------------------------------------------------
+
+func TestDisconnect(t *testing.T) {
+	ctx := context.Background()
+	if err := (&external{service: &mockMemberClient{}}).Disconnect(ctx); err != nil {
+		t.Errorf("Disconnect should not fail, got %v", err)
 	}
-	if member.Spec.ForProvider.Role == "" {
-		t.Error("Member Role should not be empty")
+}
+
+// ---- Field validation (struct-level) ---------------------------------------
+
+func TestMemberHasRequiredFields(t *testing.T) {
+	cr := newUserMember("testuser", "admin")
+
+	if cr.Spec.ForProvider.ProjectID == "" {
+		t.Error("ProjectID should not be empty")
 	}
-	if member.Name == "" {
-		t.Error("Metadata Name should not be empty")
+	if cr.Spec.ForProvider.Type == "" {
+		t.Error("Type should not be empty")
+	}
+	if cr.Spec.ForProvider.Username == nil || *cr.Spec.ForProvider.Username == "" {
+		t.Error("Username should be set")
+	}
+	if cr.Spec.ForProvider.Role == "" {
+		t.Error("Role should not be empty")
 	}
 }
 
 func TestMemberStatusFields(t *testing.T) {
-	member := &v1beta1.Member{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-member",
-		},
-		Spec: v1beta1.MemberSpec{
-			ForProvider: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-		},
+	cr := &v1beta1.Member{
 		Status: v1beta1.MemberStatus{
 			AtProvider: v1beta1.MemberObservation{
 				ID:         ptrString("member-123"),
@@ -473,147 +417,143 @@ func TestMemberStatusFields(t *testing.T) {
 		},
 	}
 
-	if member.Status.AtProvider.ID == nil {
-		t.Error("Status ID should be populated")
-	}
-	if *member.Status.AtProvider.ID != "member-123" {
-		t.Errorf("Status ID should be 'member-123', got %s", *member.Status.AtProvider.ID)
+	if cr.Status.AtProvider.ID == nil || *cr.Status.AtProvider.ID != "member-123" {
+		t.Errorf("Status ID should be 'member-123', got %v", cr.Status.AtProvider.ID)
 	}
 }
 
-func TestMemberParametersValidation(t *testing.T) {
-	tests := []struct {
-		name    string
-		params  v1beta1.MemberParameters
-		isValid bool
-	}{
-		{
-			name: "valid with all required fields",
-			params: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "admin",
-			},
-			isValid: true,
-		},
-		{
-			name: "valid with developer role",
-			params: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "developer",
-			},
-			isValid: true,
-		},
-		{
-			name: "valid with guest role",
-			params: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-				Role:      "guest",
-			},
-			isValid: true,
-		},
-		{
-			name: "missing required project ID",
-			params: v1beta1.MemberParameters{
-				Username: "testuser",
-				Role:     "admin",
-			},
-			isValid: false,
-		},
-		{
-			name: "missing required username",
-			params: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Role:      "admin",
-			},
-			isValid: false,
-		},
-		{
-			name: "missing required role",
-			params: v1beta1.MemberParameters{
-				ProjectID: "project-1",
-				Username:  "testuser",
-			},
-			isValid: false,
-		},
-	}
+// ---- entityKey helper ------------------------------------------------------
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			isValid := tt.params.ProjectID != "" && tt.params.Username != "" && tt.params.Role != ""
-			if isValid != tt.isValid {
-				t.Errorf("Expected valid=%v, got %v", tt.isValid, isValid)
-			}
-		})
-	}
-}
-
-func TestDisconnect(t *testing.T) {
-	ctx := context.Background()
-	ext := &external{
-		service: &mockMemberClient{},
-	}
-
-	err := ext.Disconnect(ctx)
+func TestEntityKeyUser(t *testing.T) {
+	cr := newUserMember("alice", "admin")
+	eType, eName, err := entityKey(cr)
 	if err != nil {
-		t.Errorf("Disconnect should not fail, got %v", err)
+		t.Fatalf("entityKey error: %v", err)
+	}
+	if eType != "u" || eName != "alice" {
+		t.Errorf("expected u/alice, got %s/%s", eType, eName)
 	}
 }
+
+func TestEntityKeyGroup(t *testing.T) {
+	cr := &v1beta1.Member{
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{
+				Type:      "group",
+				GroupName: ptrString("devs"),
+			},
+		},
+	}
+	eType, eName, err := entityKey(cr)
+	if err != nil {
+		t.Fatalf("entityKey error: %v", err)
+	}
+	if eType != "g" || eName != "devs" {
+		t.Errorf("expected g/devs, got %s/%s", eType, eName)
+	}
+}
+
+func TestEntityKeyUserMissingUsername(t *testing.T) {
+	cr := &v1beta1.Member{
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{Type: "user"},
+		},
+	}
+	if _, _, err := entityKey(cr); err == nil {
+		t.Error("entityKey should error when type=user and Username is nil")
+	}
+}
+
+func TestEntityKeyUnknownType(t *testing.T) {
+	cr := &v1beta1.Member{
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{Type: "robot"},
+		},
+	}
+	if _, _, err := entityKey(cr); err == nil {
+		t.Error("entityKey should error on unknown type")
+	}
+}
+
+// ---- resolvedGroupType helper -----------------------------------------------
+
+func TestResolvedGroupTypeDefault(t *testing.T) {
+	cr := &v1beta1.Member{
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{Type: "group", GroupName: ptrString("x")},
+		},
+	}
+	if gt := resolvedGroupType(cr); gt != defaultGroupType {
+		t.Errorf("expected default %d, got %d", defaultGroupType, gt)
+	}
+}
+
+func TestResolvedGroupTypeOverride(t *testing.T) {
+	cr := &v1beta1.Member{
+		Spec: v1beta1.MemberSpec{
+			ForProvider: v1beta1.MemberParameters{
+				Type: "group", GroupName: ptrString("x"), GroupType: ptrInt64(1),
+			},
+		},
+	}
+	if gt := resolvedGroupType(cr); gt != 1 {
+		t.Errorf("expected 1, got %d", gt)
+	}
+}
+
+// ---- mock ------------------------------------------------------------------
 
 type mockMemberClient struct {
 	harborclients.HarborClienter
-	getProjectMemberFunc    func(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error)
-	addProjectMemberFunc    func(ctx context.Context, projectID, username, role string) error
-	updateProjectMemberFunc func(ctx context.Context, projectID, username, role string) error
-	deleteProjectMemberFunc func(ctx context.Context, projectID, username string) error
-	listProjectMembersFunc  func(ctx context.Context, projectID string) ([]*harborclients.MemberStatus, error)
+	findProjectMemberFunc       func(ctx context.Context, projectID, entityType, entityName string) (*harborclients.MemberStatus, error)
+	getProjectMemberByIDFunc    func(ctx context.Context, projectID, memberID string) (*harborclients.MemberStatus, error)
+	addProjectUserMemberFunc    func(ctx context.Context, projectID, username, role string) (string, error)
+	addProjectGroupMemberFunc   func(ctx context.Context, projectID, groupName string, groupType int64, role string) (string, error)
+	updateProjectMemberByIDFunc func(ctx context.Context, projectID, memberID, role string) error
+	deleteProjectMemberByIDFunc func(ctx context.Context, projectID, memberID string) error
 }
 
-func (m *mockMemberClient) GetProjectMember(ctx context.Context, projectID, username string) (*harborclients.MemberStatus, error) {
-	if m.getProjectMemberFunc != nil {
-		return m.getProjectMemberFunc(ctx, projectID, username)
+func (m *mockMemberClient) FindProjectMember(ctx context.Context, projectID, entityType, entityName string) (*harborclients.MemberStatus, error) {
+	if m.findProjectMemberFunc != nil {
+		return m.findProjectMemberFunc(ctx, projectID, entityType, entityName)
 	}
 	return nil, nil
 }
 
-func (m *mockMemberClient) AddProjectMember(ctx context.Context, projectID, username, role string) error {
-	if m.addProjectMemberFunc != nil {
-		return m.addProjectMemberFunc(ctx, projectID, username, role)
-	}
-	return nil
-}
-
-func (m *mockMemberClient) UpdateProjectMember(ctx context.Context, projectID, username, role string) error {
-	if m.updateProjectMemberFunc != nil {
-		return m.updateProjectMemberFunc(ctx, projectID, username, role)
-	}
-	return nil
-}
-
-func (m *mockMemberClient) DeleteProjectMember(ctx context.Context, projectID, username string) error {
-	if m.deleteProjectMemberFunc != nil {
-		return m.deleteProjectMemberFunc(ctx, projectID, username)
-	}
-	return nil
-}
-
-func (m *mockMemberClient) ListProjectMembers(ctx context.Context, projectID string) ([]*harborclients.MemberStatus, error) {
-	if m.listProjectMembersFunc != nil {
-		return m.listProjectMembersFunc(ctx, projectID)
+func (m *mockMemberClient) GetProjectMemberByID(ctx context.Context, projectID, memberID string) (*harborclients.MemberStatus, error) {
+	if m.getProjectMemberByIDFunc != nil {
+		return m.getProjectMemberByIDFunc(ctx, projectID, memberID)
 	}
 	return nil, nil
 }
 
-func (m *mockMemberClient) Close() error {
+func (m *mockMemberClient) AddProjectUserMember(ctx context.Context, projectID, username, role string) (string, error) {
+	if m.addProjectUserMemberFunc != nil {
+		return m.addProjectUserMemberFunc(ctx, projectID, username, role)
+	}
+	return "", nil
+}
+
+func (m *mockMemberClient) AddProjectGroupMember(ctx context.Context, projectID, groupName string, groupType int64, role string) (string, error) {
+	if m.addProjectGroupMemberFunc != nil {
+		return m.addProjectGroupMemberFunc(ctx, projectID, groupName, groupType, role)
+	}
+	return "", nil
+}
+
+func (m *mockMemberClient) UpdateProjectMemberByID(ctx context.Context, projectID, memberID, role string) error {
+	if m.updateProjectMemberByIDFunc != nil {
+		return m.updateProjectMemberByIDFunc(ctx, projectID, memberID, role)
+	}
 	return nil
 }
 
-func (m *mockMemberClient) GetBaseURL() string {
-	return "https://harbor.example.com"
+func (m *mockMemberClient) DeleteProjectMemberByID(ctx context.Context, projectID, memberID string) error {
+	if m.deleteProjectMemberByIDFunc != nil {
+		return m.deleteProjectMemberByIDFunc(ctx, projectID, memberID)
+	}
+	return nil
 }
 
-func ptrString(s string) *string {
-	return &s
-}
+func (m *mockMemberClient) Close() error           { return nil }
+func (m *mockMemberClient) GetBaseURL() string     { return "https://harbor.example.com" }
