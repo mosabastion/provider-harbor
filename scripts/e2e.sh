@@ -145,6 +145,75 @@ helm upgrade --install "$HARBOR_RELEASE" harbor/harbor -n "$HARBOR_NS" \
 kubectl -n "$HARBOR_NS" rollout status deploy/"${HARBOR_RELEASE}-core" --timeout=300s
 ok "Harbor ready at ${HARBOR_RELEASE}-core.${HARBOR_NS}.svc:80 (admin Harbor12345)"
 
+# Deploy a mock Trivy scanner adapter so the ScannerRegistration example can
+# register successfully. Harbor validates the scanner URL at registration time
+# by calling GET /api/v1/metadata; the real Trivy pod is skipped (trivy.enabled=false)
+# to save cluster resources, so we proxy its well-known service name with a minimal
+# nginx that returns the required metadata JSON.
+log "deploying mock scanner adapter at ${HARBOR_RELEASE}-trivy.${HARBOR_NS}.svc:8080"
+kubectl -n "$HARBOR_NS" apply -f - <<MOCK
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-scanner-nginx
+  namespace: ${HARBOR_NS}
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 8080;
+        location /api/v1/metadata {
+          default_type application/json;
+          return 200 '{"scanner":{"name":"Trivy","vendor":"Aqua Security","version":"mock"},"capabilities":[{"consumes_mime_types":["application/vnd.oci.image.manifest.v1+json","application/vnd.docker.distribution.manifest.v2+json"],"produces_mime_types":["application/vnd.scanner.adapter.vuln.report.harbor+json; version=1.0"]}],"properties":{}}';
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${HARBOR_RELEASE}-trivy
+  namespace: ${HARBOR_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-trivy
+  template:
+    metadata:
+      labels:
+        app: mock-trivy
+    spec:
+      containers:
+        - name: trivy
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+      volumes:
+        - name: cfg
+          configMap:
+            name: mock-scanner-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${HARBOR_RELEASE}-trivy
+  namespace: ${HARBOR_NS}
+spec:
+  selector:
+    app: mock-trivy
+  ports:
+    - port: 8080
+      targetPort: 8080
+MOCK
+kubectl -n "$HARBOR_NS" rollout status deploy/"${HARBOR_RELEASE}-trivy" --timeout=60s
+ok "mock scanner adapter ready at ${HARBOR_RELEASE}-trivy.${HARBOR_NS}.svc:8080"
+
 # 4. run uptest over the examples (apply -> Ready -> import -> delete).
 log "running uptest e2e against the real Harbor backend"
 LIST="$(ls examples/e2e/*.yaml | paste -sd, -)"
