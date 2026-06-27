@@ -13,6 +13,7 @@ import (
 	xpcontroller "github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -109,6 +110,8 @@ func main() {
 	// management-policy support in its reconciler.
 	o := xpcontroller.Options{
 		MaxConcurrentReconciles: *maxReconcileRate,
+		GlobalRateLimiter:       ratelimiter.NewGlobal(*maxReconcileRate),
+		PollInterval:            *pollInterval,
 		Features:                feats,
 	}
 
@@ -116,11 +119,7 @@ func main() {
 	kingpin.FatalIfError(projectcontroller.Setup(mgr, o), "Cannot setup Project controller")
 
 	// Setup Scanner controller
-	kingpin.FatalIfError(scannercontroller.Setup(mgr, scannercontroller.Options{
-		Logger:       log.WithValues("controller", "scanner"),
-		PollInterval: pollInterval.String(),
-		Features:     feats,
-	}), "Cannot setup Scanner controller")
+	kingpin.FatalIfError(scannercontroller.Setup(mgr, o), "Cannot setup Scanner controller")
 
 	// Setup User controller
 	kingpin.FatalIfError(usercontroller.Setup(mgr, o), "Cannot setup User controller")

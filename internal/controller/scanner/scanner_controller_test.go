@@ -21,8 +21,8 @@ import (
 func TestConnectNotScannerRegistration(t *testing.T) {
 	ctx := context.Background()
 	conn := &connector{
-		kube:   nil,
-		logger: logging.NewNopLogger(),
+		kube: nil,
+		log:  logging.NewNopLogger(),
 	}
 
 	_, err := conn.Connect(ctx, nil)
@@ -34,8 +34,8 @@ func TestConnectNotScannerRegistration(t *testing.T) {
 func TestConnectClientError(t *testing.T) {
 	ctx := context.Background()
 	conn := &connector{
-		kube:   nil,
-		logger: logging.NewNopLogger(),
+		kube: nil,
+		log:  logging.NewNopLogger(),
 	}
 
 	_, err := conn.Connect(ctx, &v1beta1.ScannerRegistration{})

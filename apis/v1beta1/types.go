@@ -70,6 +70,26 @@ type ProviderConfigUsage struct {
 	xpv1.TypedProviderConfigUsage `json:",inline"`
 }
 
+// GetProviderConfigReference returns the provider config reference.
+func (p *ProviderConfigUsage) GetProviderConfigReference() xpv1.ProviderConfigReference {
+	return p.ProviderConfigReference
+}
+
+// SetProviderConfigReference sets the provider config reference.
+func (p *ProviderConfigUsage) SetProviderConfigReference(r xpv1.ProviderConfigReference) {
+	p.ProviderConfigReference = r
+}
+
+// GetResourceReference returns the resource reference.
+func (p *ProviderConfigUsage) GetResourceReference() xpv1.TypedReference {
+	return p.ResourceReference
+}
+
+// SetResourceReference sets the resource reference.
+func (p *ProviderConfigUsage) SetResourceReference(r xpv1.TypedReference) {
+	p.ResourceReference = r
+}
+
 // +kubebuilder:object:root=true
 
 // ProviderConfigUsageList contains a list of ProviderConfigUsage

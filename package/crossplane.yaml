@@ -1,5 +1,8 @@
 apiVersion: meta.pkg.crossplane.io/v1
 kind: Provider
+spec:
+  crossplane:
+    version: ">=v2.0.0-0"
 metadata:
   name: provider-harbor
   annotations:

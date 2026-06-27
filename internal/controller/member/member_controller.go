@@ -7,7 +7,6 @@ package member
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/pkg/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,6 +22,7 @@ import (
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	apiv1beta1 "github.com/rossigee/provider-harbor/apis/v1beta1"
 	"github.com/rossigee/provider-harbor/apis/member/v1beta1"
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
 	controllerpkg "github.com/rossigee/provider-harbor/internal/controller"
@@ -30,6 +30,7 @@ import (
 
 const (
 	errNotMember    = "managed resource is not a Member custom resource"
+	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errMemberGet    = "cannot get Harbor member"
 	errMemberCreate = "cannot add Harbor member"
 	errMemberUpdate = "cannot update Harbor member"
@@ -48,10 +49,12 @@ func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 	reconcilerOpts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{
 			kube:         mgr.GetClient(),
+			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apiv1beta1.ProviderConfigUsage{}),
 			newServiceFn: harborclients.NewHarborClientFromProviderConfig,
 		}),
 		managed.WithLogger(logging.NewLogrLogger(mgr.GetLogger().WithValues("controller", name))),
-		managed.WithPollInterval(1 * time.Minute),
+		managed.WithPollInterval(o.PollInterval),
+		managed.WithPollJitterHook(o.PollInterval / 10),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorder(name))),
 	}
 	reconcilerOpts = append(reconcilerOpts, controllerpkg.ReconcilerOptions(o)...)
@@ -65,18 +68,24 @@ func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 		WithOptions(o.ForControllerRuntime()).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.Member{}).
-		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
+		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
 }
 
 type connector struct {
 	kube         client.Client
+	usage        resource.ModernTracker
 	newServiceFn func(context.Context, client.Client, resource.Managed) (harborclients.HarborClienter, error)
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	_, ok := mg.(*v1beta1.Member)
+	cr, ok := mg.(*v1beta1.Member)
 	if !ok {
 		return nil, errors.New(errNotMember)
+	}
+	if c.usage != nil {
+		if err := c.usage.Track(ctx, cr); err != nil {
+			return nil, errors.Wrap(err, errTrackPCUsage)
+		}
 	}
 	svc, err := c.newServiceFn(ctx, c.kube, mg)
 	if err != nil {
