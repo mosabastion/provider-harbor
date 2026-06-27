@@ -22,6 +22,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
+	apiv1beta1 "github.com/rossigee/provider-harbor/apis/v1beta1"
 	"github.com/rossigee/provider-harbor/apis/user/v1beta1"
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
 	controllerpkg "github.com/rossigee/provider-harbor/internal/controller"
@@ -46,10 +47,12 @@ func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 	reconcilerOpts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{
 			kube:         mgr.GetClient(),
+			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apiv1beta1.ProviderConfigUsage{}),
 			newServiceFn: harborclients.NewHarborClientFromProviderConfig,
 		}),
 		managed.WithLogger(logging.NewLogrLogger(mgr.GetLogger().WithValues("controller", name))),
-		managed.WithPollInterval(1 * time.Minute),
+		managed.WithPollInterval(o.PollInterval),
+		managed.WithPollJitterHook(o.PollInterval / 10),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorder(name))),
 	}
 	// Feature-gated options (e.g. Management Policies) appended when enabled.
@@ -64,13 +67,14 @@ func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 		WithOptions(o.ForControllerRuntime()).
 		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.User{}).
-		Complete(ratelimiter.NewReconciler(name, r, ratelimiter.NewGlobal(1)))
+		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
 }
 
 // A connector is expected to produce an ExternalClient when its Connect method
 // is called.
 type connector struct {
 	kube         client.Client
+	usage        resource.ModernTracker
 	newServiceFn func(ctx context.Context, kube client.Client, mg resource.Managed) (harborclients.HarborClienter, error)
 }
 
@@ -80,9 +84,15 @@ type connector struct {
 // 3. Getting the credentials specified by the ProviderConfig.
 // 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	_, ok := mg.(*v1beta1.User)
+	cr, ok := mg.(*v1beta1.User)
 	if !ok {
 		return nil, errors.New(errNotUser)
+	}
+
+	if c.usage != nil {
+		if err := c.usage.Track(ctx, cr); err != nil {
+			return nil, errors.Wrap(err, errTrackPCUsage)
+		}
 	}
 
 	svc, err := c.newServiceFn(ctx, c.kube, mg)

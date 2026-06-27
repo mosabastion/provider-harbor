@@ -20,9 +20,10 @@ import (
 	"context"
 	"time"
 
+	xpcontroller "github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
-	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
@@ -31,9 +32,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	apiv1beta1 "github.com/rossigee/provider-harbor/apis/v1beta1"
 	"github.com/rossigee/provider-harbor/apis/scanner/v1beta1"
 	"github.com/rossigee/provider-harbor/internal/clients"
-	"github.com/rossigee/provider-harbor/internal/features"
+	controllerpkg "github.com/rossigee/provider-harbor/internal/controller"
 )
 
 const (
@@ -44,53 +46,55 @@ const (
 	errNewClient              = "cannot create new Service"
 )
 
-// Options contains options for controller setup
-type Options struct {
-	Logger       logging.Logger
-	PollInterval string
-	// Features carries the provider feature gates (e.g. EnableBetaManagementPolicies).
-	// This controller has its own Options struct rather than reusing the shared
-	// crossplane-runtime controller.Options, so the feature set is threaded here.
-	Features *feature.Flags
-}
-
 // Setup adds a controller that reconciles ScannerRegistration managed resources
-func Setup(mgr ctrl.Manager, opts Options) error {
+func Setup(mgr ctrl.Manager, o xpcontroller.Options) error {
 	name := managed.ControllerName(v1beta1.ScannerRegistrationGroupVersionKind.Kind)
+
+	log := logging.NewLogrLogger(mgr.GetLogger().WithValues("controller", name))
 
 	reconcilerOpts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{
-			kube:   mgr.GetClient(),
-			logger: opts.Logger,
+			kube:  mgr.GetClient(),
+			usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apiv1beta1.ProviderConfigUsage{}),
+			log:   log,
 		}),
-		managed.WithLogger(opts.Logger.WithValues("controller", name)),
-		managed.WithPollInterval(10 * time.Minute),
+		managed.WithLogger(log),
+		managed.WithPollInterval(o.PollInterval),
+		managed.WithPollJitterHook(o.PollInterval / 10),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorder(name))),
 	}
-	// Feature-gated options (e.g. Management Policies) appended when enabled.
-	if opts.Features != nil && opts.Features.Enabled(features.EnableBetaManagementPolicies) {
-		reconcilerOpts = append(reconcilerOpts, managed.WithManagementPolicies())
-	}
+	reconcilerOpts = append(reconcilerOpts, controllerpkg.ReconcilerOptions(o)...)
+
+	r := managed.NewReconciler(mgr,
+		resource.ManagedKind(v1beta1.ScannerRegistrationGroupVersionKind),
+		reconcilerOpts...)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
+		WithOptions(o.ForControllerRuntime()).
+		WithEventFilter(resource.DesiredStateChanged()).
 		For(&v1beta1.ScannerRegistration{}).
-		Complete(managed.NewReconciler(mgr,
-			resource.ManagedKind(v1beta1.ScannerRegistrationGroupVersionKind),
-			reconcilerOpts...))
+		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
 }
 
 // connector is responsible for producing ExternalClients.
 type connector struct {
-	kube   client.Client
-	logger logging.Logger
+	kube  client.Client
+	usage resource.ModernTracker
+	log   logging.Logger
 }
 
 // Connect produces an ExternalClient by creating a Harbor client
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	_, ok := mg.(*v1beta1.ScannerRegistration)
+	cr, ok := mg.(*v1beta1.ScannerRegistration)
 	if !ok {
 		return nil, errors.New(errNotScannerRegistration)
+	}
+
+	if c.usage != nil {
+		if err := c.usage.Track(ctx, cr); err != nil {
+			return nil, errors.Wrap(err, errTrackPCUsage)
+		}
 	}
 
 	harborClient, err := clients.NewHarborClientFromProviderConfig(ctx, c.kube, mg)
@@ -98,7 +102,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		return nil, errors.Wrap(err, errNewClient)
 	}
 
-	return &external{service: harborClient, logger: c.logger}, nil
+	return &external{service: harborClient, logger: c.log}, nil
 }
 
 // external observes, then either creates, updates, or deletes an
