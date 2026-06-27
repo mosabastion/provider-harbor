@@ -9,7 +9,9 @@
 set -aeuo pipefail
 : "${KUBECTL:=kubectl}"
 NS="${UPTEST_NAMESPACE:-uptest}"
-HARBOR_URL="${HARBOR_URL:-http://harbor.harbor.svc}"
+# e2e.sh exports HARBOR_HOST as "<release>-core.<ns>.svc; fall back for standalone runs.
+HARBOR_HOST="${HARBOR_HOST:-my-harbor-core.harbor.svc}"
+HARBOR_URL="http://${HARBOR_HOST}"
 HARBOR_PASSWORD="${HARBOR_PASSWORD:-Harbor12345}"
 IMAGES_PROJECT="${IMAGES_PROJECT:-uptest-images}"
 
@@ -21,8 +23,9 @@ ${KUBECTL} -n "$NS" create secret generic harbor-creds \
 ${KUBECTL} -n "$NS" create secret generic user-password \
   --from-literal=password='Uptest-User-123' \
   --dry-run=client -o yaml | ${KUBECTL} apply -f -
+# ProviderConfig lives in harbor.crossplane.io (not .m.) — same as ProviderConfigUsage.
 cat <<YAML | ${KUBECTL} apply -f -
-apiVersion: harbor.m.crossplane.io/v1beta1
+apiVersion: harbor.crossplane.io/v1beta1
 kind: ProviderConfig
 metadata:
   name: harbor-e2e
@@ -54,7 +57,7 @@ spec:
           # gcr mirror avoids Docker Hub anonymous pull-rate limits in CI.
           image: mirror.gcr.io/library/alpine:3.20
           env:
-            - {name: HARBOR, value: "harbor.harbor.svc"}
+            - {name: HARBOR, value: "${HARBOR_HOST}"}
             - {name: PW, value: "${HARBOR_PASSWORD}"}
             - {name: PROJECT, value: "${IMAGES_PROJECT}"}
           command: ["/bin/sh", "-c"]
@@ -77,4 +80,12 @@ ${KUBECTL} -n "$NS" wait --for=condition=complete job/seed-image --timeout=300s
 
 echo "uptest-setup: waiting until provider is healthy"
 ${KUBECTL} wait provider.pkg --all --for condition=Healthy --timeout 5m
+
+# Wait for MR CRDs to be Established before applying any resources. Crossplane
+# can report Healthy slightly ahead of the apiserver's discovery cache refresh.
+echo "uptest-setup: waiting for MR CRDs to be Established"
+${KUBECTL} wait --for=condition=Established \
+  crd/projects.harbor.m.crossplane.io \
+  crd/users.harbor.m.crossplane.io \
+  --timeout 60s
 echo "uptest-setup: done"

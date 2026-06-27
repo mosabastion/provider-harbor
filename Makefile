@@ -173,7 +173,11 @@ local-deploy: build controlplane.up local.xpkg.deploy.provider.$(PROJECT_NAME)
 	@$(KUBECTL) -n upbound-system wait --for=condition=Available deployment --all --timeout=5m
 	@$(OK) running locally built provider
 
-e2e: local-deploy uptest
+e2e:
+	@bash scripts/e2e.sh
+
+e2e-keep:
+	@KEEP=true bash scripts/e2e.sh
 
 crddiff: $(UPTEST)
 	@$(INFO) Checking breaking CRD schema changes
