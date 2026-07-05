@@ -18,11 +18,13 @@ package clients
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/go-openapi/runtime"
+	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 	"github.com/pkg/errors"
 	"k8s.io/utils/ptr"
 )
@@ -49,6 +51,36 @@ func isHarborCode(err error, code int) bool {
 // isHarborNotFound maps a Harbor 404 to the (nil, nil) not-found contract.
 func isHarborNotFound(err error) bool {
 	return isHarborCode(err, http.StatusNotFound)
+}
+
+// wrapHarborErr wraps err with msg, substituting Harbor's actual error
+// code/message for the SDK's own error string when one is available.
+//
+// Every generated Harbor response type's Error() method does
+// fmt.Sprintf("...%+v", o.Payload) on a *models.Errors, whose Errors field is
+// a []*models.Error. Go's fmt only auto-dereferences a POINTER PASSED
+// DIRECTLY to a verb; a pointer nested inside a slice field is printed as a
+// raw address instead. So every Harbor 4xx/5xx response — including the one
+// that actually explains a failure like a rejected robot-creation payload —
+// renders as unreadable noise (e.g. `&{Errors:[0xc0001234]}`) instead of the
+// code/message Harbor sent. This dereferences the payload directly instead of
+// going through that broken Error() string.
+func wrapHarborErr(err error, msg string) error {
+	var payloader interface{ GetPayload() *harbormodels.Errors }
+	if errors.As(err, &payloader) {
+		if payload := payloader.GetPayload(); payload != nil && len(payload.Errors) > 0 {
+			parts := make([]string, 0, len(payload.Errors))
+			for _, e := range payload.Errors {
+				if e != nil {
+					parts = append(parts, fmt.Sprintf("%s: %s", e.Code, e.Message))
+				}
+			}
+			if len(parts) > 0 {
+				return errors.Errorf("%s: %s", msg, strings.Join(parts, "; "))
+			}
+		}
+	}
+	return errors.Wrap(err, msg)
 }
 
 // idFromLocation extracts the trailing numeric ID from a Harbor Location header
