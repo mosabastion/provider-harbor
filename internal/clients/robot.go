@@ -237,7 +237,7 @@ func (c *HarborClient) CreateRobot(ctx context.Context, spec *RobotSpec) (*Robot
 		if isHarborCode(err, http.StatusConflict) {
 			return nil, errors.Errorf("robot %q already exists in Harbor and cannot be imported (Harbor discloses the secret only at creation); delete the existing robot to let this resource manage it", spec.Name)
 		}
-		return nil, errors.Wrap(err, "cannot create Harbor robot")
+		return nil, wrapHarborErr(err, "cannot create Harbor robot")
 	}
 
 	created := resp.Payload
@@ -340,7 +340,7 @@ func (c *HarborClient) UpdateRobot(ctx context.Context, robotID string, spec *Ro
 
 	params := harborrobot.NewUpdateRobotParams().WithContext(ctx).WithRobotID(id).WithRobot(req)
 	if _, err := v2Client.Robot.UpdateRobot(ctx, params); err != nil {
-		return nil, errors.Wrap(err, "cannot update Harbor robot")
+		return nil, wrapHarborErr(err, "cannot update Harbor robot")
 	}
 
 	return c.GetRobot(ctx, robotID)

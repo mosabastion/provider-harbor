@@ -318,6 +318,42 @@ func TestRobotClient_CreateConflict(t *testing.T) {
 	}
 }
 
+// TestRobotClient_CreateBadRequestSurfacesRealMessage proves a non-409 4xx from
+// Harbor surfaces its actual code/message, not the SDK's Error() string — which
+// renders a *models.Errors payload via "%+v" and, because the nested
+// []*models.Error pointers aren't the value fmt was given directly, prints raw
+// pointer addresses (e.g. "&{Errors:[0xc0001234]}") instead of anything
+// diagnostic. This is exactly what hid the real cause of a rejected
+// system-level robot's permission payload.
+func TestRobotClient_CreateBadRequestSurfacesRealMessage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2.0/robots", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":[{"code":"BAD_REQUEST","message":"invalid permission scope for kind system"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+
+	_, err := c.CreateRobot(context.Background(), &RobotSpec{
+		Name:  "platform-api",
+		Level: "system",
+		Permissions: []RobotPermission{
+			{Kind: ptr.To("system"), Namespace: "project", Access: []string{"list"}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error on 400 create response")
+	}
+	if strings.Contains(err.Error(), "0x") {
+		t.Errorf("error still leaks a raw pointer address instead of the real message: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "BAD_REQUEST") || !strings.Contains(err.Error(), "invalid permission scope for kind system") {
+		t.Errorf("expected Harbor's actual code/message in the error, got %q", err.Error())
+	}
+}
+
 func fakeHarborMembers(t *testing.T) *httptest.Server {
 	t.Helper()
 	var mu sync.Mutex

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+**`Robot`: surface Harbor's actual error code/message on a failed Create/Update, instead of a raw pointer address**
+Every generated Harbor SDK response type's `Error()` method renders its `*models.Errors` payload via `fmt.Sprintf("...%+v", payload)`. Go's `fmt` only auto-dereferences a pointer passed *directly* to a verb; the payload's `Errors []*models.Error` field is a slice, so its pointer elements print as raw addresses (e.g. `&{Errors:[0xc0001234]}`) instead of the `code`/`message` Harbor actually returned. This hid the real reason behind every non-409 4xx/5xx from `CreateRobot`/`UpdateRobot`, including a rejected system-level robot's permission payload.
+- New `wrapHarborErr` helper (`internal/clients/util.go`) type-asserts the SDK error for `GetPayload() *models.Errors` and, when present, formats each `code: message` pair directly instead of going through the SDK's broken `Error()` string. Wired into `CreateRobot`'s and `UpdateRobot`'s generic error paths (the 409/import-conflict path already had its own actionable message and is unchanged).
+- New httptest proof (`TestRobotClient_CreateBadRequestSurfacesRealMessage`) asserts a 400 response's actual code/message reach the returned error and that no raw pointer address (`0x...`) leaks into it.
+
 ## [0.18.0] - 2026-06-27
 
 ### Removed
