@@ -15,6 +15,7 @@ on:
       - master
       - release-*
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - master
       - release-*
@@ -209,7 +210,8 @@ jobs:
   e2e:
     # The costliest job, so it runs only once every cheap check is green.
     needs: [changes, lint, check-diff, unit-tests, security-scan]
-    if: needs.changes.outputs.e2e == 'true'
+    # PRs gate merges, so a push to main re-proves nothing; drafts wait for ready_for_review.
+    if: needs.changes.outputs.e2e == 'true' && github.event_name != 'push' && !github.event.pull_request.draft
     permissions:
       contents: read
       packages: write
