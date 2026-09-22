@@ -1,14 +1,9 @@
 name: E2E (kind + Harbor)
 
 # Runs only on PRs and on merge to the default branch — not on every branch push.
+# Called from ci.yml once every cheap check is green.
 on:
-  pull_request:
-  push:
-    branches: [main, master]
-
-concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 env:
   GO_VERSION: '1.26.4'
