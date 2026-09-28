@@ -171,7 +171,8 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: moderate
-          allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0
+          # golang.org/x/* is BSD-3-Clause plus Google's additive patent grant.
+          allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0, LicenseRef-scancode-google-patent-license-golang
 
   notification:
     name: Security Scan Notification
