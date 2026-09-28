@@ -55,10 +55,11 @@ if [ -z "$(docker ps -q -f "name=^${REG_NAME}$")" ]; then
   log "starting local registry ${REG_NAME} on :${REG_PORT}"
   docker run -d --restart=always -p "127.0.0.1:${REG_PORT}:5000" --name "$REG_NAME" registry:2 >/dev/null
 fi
-REG_HOST="${REG_HOST:-registry.e2e.local}"
 docker network connect kind "$REG_NAME" 2>/dev/null || true
 REG_IP="$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$REG_NAME")"
 [ -n "$REG_IP" ] || die "could not determine ${REG_NAME} IP on the kind network"
+# Crossplane resolves the digest in-Pod over HTTPS unless the host is RFC1918, so address the registry by IP.
+REG_HOST="${REG_HOST:-$REG_IP}"
 PUSH_REF="localhost:${REG_PORT}/${PROVIDER}:e2e"
 REG_REF="${REG_HOST}:5000/${PROVIDER}:e2e"
 
@@ -75,7 +76,7 @@ done
 
 log "adding ${REG_HOST} -> ${REG_IP} to CoreDNS (for the in-Pod digest resolve)"
 CURRENT_CF="$(kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
-if ! grep -q "$REG_HOST" <<<"$CURRENT_CF"; then
+if [ "$REG_HOST" != "$REG_IP" ] && ! grep -q "$REG_HOST" <<<"$CURRENT_CF"; then
   NEW_CF="$(CURRENT_CF="$CURRENT_CF" REG_IP="$REG_IP" REG_HOST="$REG_HOST" python3 - <<'PY'
 import os, sys
 cf = os.environ["CURRENT_CF"]
