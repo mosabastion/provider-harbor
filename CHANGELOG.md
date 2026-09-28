@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-28
+
+### Features
+
+**`Replication`: pull-mode support (resolve a named source registry, local-Harbor destination), cron passthrough, and a real `lastExecution` status**
+- `spec.forProvider.sourceRegistry` is now resolved to Harbor's numeric registry id and sent as `src_registry` on create/update — previously read from the CR but never passed to the SDK model, so every "pull an external registry into this Harbor" policy silently replicated nothing from the named source.
+- `destinationReg` is now optional (`*ReplicationDestination`, and its `name` is optional too): a nil/empty-name destination means the local Harbor. `resolveDestRegistryID` no longer hard-errors "destination registry is required" in that case; `dest_namespace` is still sent from `destinationReg.namespace` so the destination project is reachable without a destination registry object at all.
+- New `spec.forProvider.cron` field reaches Harbor as `trigger.trigger_settings.cron` when `trigger: scheduled` (previously dropped entirely — a scheduled trigger had no way to carry a schedule). The client rejects a `scheduled` trigger with an empty/missing cron.
+- `status.atProvider.lastExecutionStatus` (a bare string) is replaced by `status.atProvider.lastExecution {status, statusText, start, end, succeed, failed}`, sourced from the newest entry (`internal/clients.LatestReplicationExecution`, by start time) returned by `ListReplicationExecutions`. Nil until the policy has run at least once.
+- `Observe` now compares source registry, destination registry + namespace, filters, and trigger type + cron — not just `description`/`enabled` as before, so drift in any of those now actually triggers an `Update`.
+- New httptest client proofs (pull-mode create sends `src_registry` and no `dest_registry`; a nil destination doesn't error; cron reaches `trigger_settings`; an unknown source registry name returns a clear error) and controller tests (newest-execution mapping; no-executions leaves `lastExecution` nil; drift in source/filters/cron flips `ResourceUpToDate`).
+- `examples/e2e/replication.yaml` updated to the pull-mode shape.
+
 ### Fixed
 
 **`Robot`: surface Harbor's actual error code/message on a failed Create/Update, instead of a raw pointer address**

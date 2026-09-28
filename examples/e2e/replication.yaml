@@ -24,8 +24,12 @@ metadata:
 spec:
   forProvider:
     name: uptest-replication
+    # Pull-mode: source is the named registry above. destinationReg has no
+    # name, so the destination is the local Harbor; namespace still targets
+    # the destination project.
+    sourceRegistry: uptest-repl-registry
     destinationReg:
-      name: uptest-repl-registry
+      namespace: uptest
     trigger: manual
     enabled: true
     filters:

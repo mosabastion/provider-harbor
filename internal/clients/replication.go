@@ -48,6 +48,7 @@ type ReplicationPolicySpec struct {
 	DestinationReg  *ReplicationPolicyDestination
 	Filters         []ReplicationPolicyFilter
 	Trigger         string // manual, scheduled, event_based
+	Cron            *string
 	DeleteSourceTag *bool
 	Override        *bool
 	Enabled         *bool
@@ -55,12 +56,18 @@ type ReplicationPolicySpec struct {
 
 // ReplicationPolicyStatus represents the status of a replication policy
 type ReplicationPolicyStatus struct {
-	ID           string
-	Name         string
-	Description  *string
-	Enabled      bool
-	CreationTime time.Time
-	UpdateTime   time.Time
+	ID                 string
+	Name               string
+	Description        *string
+	Enabled            bool
+	SourceRegistryName string
+	DestRegistryName   string
+	DestNamespace      string
+	Filters            []ReplicationPolicyFilter
+	Trigger            string
+	Cron               string
+	CreationTime       time.Time
+	UpdateTime         time.Time
 }
 
 // ReplicationExecution represents a replication execution
@@ -68,39 +75,79 @@ type ReplicationExecution struct {
 	ID           string
 	PolicyID     string
 	Status       string
+	StatusText   string
 	StartTime    time.Time
 	EndTime      time.Time
 	SuccessCount int64
 	FailedCount  int64
 }
 
+// LatestReplicationExecution returns the newest execution (by start time,
+// falling back to numeric execution ID on a tie), or nil if execs is empty.
+func LatestReplicationExecution(execs []*ReplicationExecution) *ReplicationExecution {
+	var latest *ReplicationExecution
+	for _, e := range execs {
+		if e == nil {
+			continue
+		}
+		if latest == nil || e.StartTime.After(latest.StartTime) {
+			latest = e
+			continue
+		}
+		if e.StartTime.Equal(latest.StartTime) {
+			eID, _ := strconv.ParseInt(e.ID, 10, 64)
+			lID, _ := strconv.ParseInt(latest.ID, 10, 64)
+			if eID > lID {
+				latest = e
+			}
+		}
+	}
+	return latest
+}
+
 // replicationPolicyModel converts a ReplicationPolicySpec to the Harbor SDK
 // ReplicationPolicy model used for create and update calls.
 // Caveats:
-//   - DestinationReg carries name+URL from the CR. Harbor's replication API
-//     accepts a Registry object on the body; Harbor matches by registry ID on the
-//     server. We pass name+URL and rely on Harbor to resolve the internal ID.
-//   - SourceRegistry is intentionally left nil (local) because the CR stores only
-//     a human-readable name. Resolving it would require an extra list+match call.
+//   - Both DestinationReg and SourceRegistry carry only a human-readable name on
+//     the CR; Harbor's replication API references registries by numeric id, so
+//     the caller resolves each name to an id (or nil, for the local Harbor) via
+//     resolveDestRegistryID/resolveSourceRegistryID before calling this.
 //   - DeleteSourceTag maps to ReplicateDeletion (the non-deprecated field).
 //
 // resolveDestRegistryID maps the destination registry name to its numeric Harbor
-// id (replication policies reference registries by id, not name).
-func (c *HarborClient) resolveDestRegistryID(ctx context.Context, spec *ReplicationPolicySpec) (int64, error) {
+// id. A nil/empty name means pull-mode replication into the local Harbor, so no
+// error and no id — DestNamespace still carries the destination project.
+func (c *HarborClient) resolveDestRegistryID(ctx context.Context, spec *ReplicationPolicySpec) (*int64, error) {
 	if spec.DestinationReg == nil || spec.DestinationReg.Name == "" {
-		return 0, errors.New("destination registry is required")
+		return nil, nil
 	}
 	reg, err := c.findRegistryByName(ctx, spec.DestinationReg.Name)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if reg == nil {
-		return 0, errors.Errorf("destination registry %q not found", spec.DestinationReg.Name)
+		return nil, errors.Errorf("destination registry %q not found", spec.DestinationReg.Name)
 	}
-	return reg.ID, nil
+	return &reg.ID, nil
 }
 
-func replicationPolicyModel(spec *ReplicationPolicySpec, destRegID int64) *harbormodels.ReplicationPolicy {
+// resolveSourceRegistryID maps the source registry name to its numeric Harbor
+// id. A nil/empty name means the local Harbor (no SrcRegistry set on create).
+func (c *HarborClient) resolveSourceRegistryID(ctx context.Context, spec *ReplicationPolicySpec) (*int64, error) {
+	if spec.SourceRegistry == nil || *spec.SourceRegistry == "" {
+		return nil, nil
+	}
+	reg, err := c.findRegistryByName(ctx, *spec.SourceRegistry)
+	if err != nil {
+		return nil, err
+	}
+	if reg == nil {
+		return nil, errors.Errorf("source registry %q not found", *spec.SourceRegistry)
+	}
+	return &reg.ID, nil
+}
+
+func replicationPolicyModel(spec *ReplicationPolicySpec, destRegID, srcRegID *int64) *harbormodels.ReplicationPolicy {
 	p := &harbormodels.ReplicationPolicy{
 		Name:     spec.Name,
 		Enabled:  spec.Enabled != nil && *spec.Enabled,
@@ -113,27 +160,39 @@ func replicationPolicyModel(spec *ReplicationPolicySpec, destRegID int64) *harbo
 		p.ReplicateDeletion = *spec.DeleteSourceTag
 	}
 	if spec.Trigger != "" {
-		p.Trigger = &harbormodels.ReplicationTrigger{Type: spec.Trigger}
+		trigger := &harbormodels.ReplicationTrigger{Type: spec.Trigger}
+		if spec.Trigger == "scheduled" && spec.Cron != nil && *spec.Cron != "" {
+			trigger.TriggerSettings = &harbormodels.ReplicationTriggerSettings{Cron: *spec.Cron}
+		}
+		p.Trigger = trigger
+	}
+	if srcRegID != nil {
+		p.SrcRegistry = &harbormodels.Registry{ID: *srcRegID}
+	}
+	if destRegID != nil {
+		// Harbor references the registry by its numeric id; name/url alone yield a
+		// 400. The id is resolved by the caller via resolveDestRegistryID.
+		p.DestRegistry = &harbormodels.Registry{ID: *destRegID}
 	}
 	if spec.DestinationReg != nil {
-		// Harbor references the registry by its numeric id; name/url alone yield a
-		// 400. The id is resolved by the caller via findRegistryByName.
-		p.DestRegistry = &harbormodels.Registry{ID: destRegID}
+		// Set regardless of whether the destination is local: pull-mode still
+		// needs to target a specific project in this Harbor.
 		p.DestNamespace = spec.DestinationReg.Namespace
 	}
 	if len(spec.Filters) > 0 {
 		p.Filters = make([]*harbormodels.ReplicationFilter, len(spec.Filters))
 		for i, f := range spec.Filters {
-			p.Filters[i] = &harbormodels.ReplicationFilter{Type: replicationFilterType(f.Type), Value: f.Value}
+			p.Filters[i] = &harbormodels.ReplicationFilter{Type: ReplicationFilterType(f.Type), Value: f.Value}
 		}
 	}
 	return p
 }
 
-// replicationFilterType maps the CR's filter type to Harbor's. Harbor names the
+// ReplicationFilterType maps the CR's filter type to Harbor's. Harbor names the
 // repository filter "name" (its valid types are name/tag/label/resource); the CR
-// exposes it as the friendlier "repository".
-func replicationFilterType(t string) string {
+// exposes it as the friendlier "repository". Exported so the controller can use
+// the same mapping when comparing desired vs. observed filters.
+func ReplicationFilterType(t string) string {
 	if t == "repository" {
 		return "name"
 	}
@@ -147,12 +206,35 @@ func replicationPolicyStatusFromModel(p *harbormodels.ReplicationPolicy) *Replic
 		return &ReplicationPolicyStatus{}
 	}
 	st := &ReplicationPolicyStatus{
-		ID:      strconv.FormatInt(p.ID, 10),
-		Name:    p.Name,
-		Enabled: p.Enabled,
+		ID:            strconv.FormatInt(p.ID, 10),
+		Name:          p.Name,
+		Enabled:       p.Enabled,
+		DestNamespace: p.DestNamespace,
 	}
 	if p.Description != "" {
 		st.Description = ptr.To(p.Description)
+	}
+	if p.SrcRegistry != nil {
+		st.SourceRegistryName = p.SrcRegistry.Name
+	}
+	if p.DestRegistry != nil {
+		st.DestRegistryName = p.DestRegistry.Name
+	}
+	if p.Trigger != nil {
+		st.Trigger = p.Trigger.Type
+		if p.Trigger.TriggerSettings != nil {
+			st.Cron = p.Trigger.TriggerSettings.Cron
+		}
+	}
+	if len(p.Filters) > 0 {
+		st.Filters = make([]ReplicationPolicyFilter, len(p.Filters))
+		for i, f := range p.Filters {
+			if f == nil {
+				continue
+			}
+			v, _ := f.Value.(string)
+			st.Filters[i] = ReplicationPolicyFilter{Type: f.Type, Value: v}
+		}
 	}
 	if t := time.Time(p.CreationTime); !t.IsZero() {
 		st.CreationTime = t
@@ -191,8 +273,8 @@ func (c *HarborClient) CreateReplicationPolicy(ctx context.Context, spec *Replic
 	if spec.Name == "" {
 		return nil, errors.New("policy name is required")
 	}
-	if spec.DestinationReg == nil || spec.DestinationReg.Name == "" {
-		return nil, errors.New("destination registry is required")
+	if spec.Trigger == "scheduled" && (spec.Cron == nil || *spec.Cron == "") {
+		return nil, errors.New("cron is required when trigger is scheduled")
 	}
 
 	v2Client := c.clientSet.V2()
@@ -202,16 +284,19 @@ func (c *HarborClient) CreateReplicationPolicy(ctx context.Context, spec *Replic
 
 	c.logger.Info("Creating Harbor replication policy",
 		"name", spec.Name,
-		"destination", spec.DestinationReg.Name,
 		"trigger", spec.Trigger)
 
 	destRegID, err := c.resolveDestRegistryID(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
+	srcRegID, err := c.resolveSourceRegistryID(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
 	params := harborreplication.NewCreateReplicationPolicyParams().
 		WithContext(ctx).
-		WithPolicy(replicationPolicyModel(spec, destRegID))
+		WithPolicy(replicationPolicyModel(spec, destRegID, srcRegID))
 	resp, err := v2Client.Replication.CreateReplicationPolicy(ctx, params)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot create Harbor replication policy")
@@ -283,6 +368,9 @@ func (c *HarborClient) UpdateReplicationPolicy(ctx context.Context, policyID str
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid replication policy ID")
 	}
+	if spec.Trigger == "scheduled" && (spec.Cron == nil || *spec.Cron == "") {
+		return nil, errors.New("cron is required when trigger is scheduled")
+	}
 
 	v2Client := c.clientSet.V2()
 	if v2Client == nil {
@@ -295,7 +383,11 @@ func (c *HarborClient) UpdateReplicationPolicy(ctx context.Context, policyID str
 	if err != nil {
 		return nil, err
 	}
-	model := replicationPolicyModel(spec, destRegID)
+	srcRegID, err := c.resolveSourceRegistryID(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	model := replicationPolicyModel(spec, destRegID, srcRegID)
 	model.ID = id
 	params := harborreplication.NewUpdateReplicationPolicyParams().
 		WithContext(ctx).
@@ -404,6 +496,7 @@ func (c *HarborClient) ListReplicationExecutions(ctx context.Context, policyID s
 			ID:           strconv.FormatInt(e.ID, 10),
 			PolicyID:     policyID,
 			Status:       e.Status,
+			StatusText:   e.StatusText,
 			StartTime:    time.Time(e.StartTime),
 			EndTime:      time.Time(e.EndTime),
 			SuccessCount: int64(e.Succeed),

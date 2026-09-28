@@ -196,7 +196,7 @@ func TestCreateReplicationWithAllFields(t *testing.T) {
 				Filters: []v1beta1.ReplicationFilter{
 					{Type: "name", Value: "**"},
 				},
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -455,7 +455,7 @@ func TestCreateReplicationSuccess(t *testing.T) {
 		Spec: v1beta1.ReplicationSpec{
 			ForProvider: v1beta1.ReplicationParameters{
 				Name: "my-replication",
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -491,7 +491,7 @@ func TestCreateReplicationError(t *testing.T) {
 		Spec: v1beta1.ReplicationSpec{
 			ForProvider: v1beta1.ReplicationParameters{
 				Name: "my-replication",
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -680,7 +680,7 @@ func TestReplicationHasRequiredFields(t *testing.T) {
 		Spec: v1beta1.ReplicationSpec{
 			ForProvider: v1beta1.ReplicationParameters{
 				Name: "my-replication",
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -732,7 +732,7 @@ func TestReplicationParametersValidation(t *testing.T) {
 			name: "valid with required fields",
 			params: v1beta1.ReplicationParameters{
 				Name: "my-replication",
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -745,7 +745,7 @@ func TestReplicationParametersValidation(t *testing.T) {
 			params: v1beta1.ReplicationParameters{
 				Name:    "scheduled-replication",
 				Trigger: "scheduled",
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -758,7 +758,7 @@ func TestReplicationParametersValidation(t *testing.T) {
 			params: v1beta1.ReplicationParameters{
 				Name:    "filtered-replication",
 				Filters: []v1beta1.ReplicationFilter{{Type: "name", Value: "*"}},
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -769,7 +769,7 @@ func TestReplicationParametersValidation(t *testing.T) {
 		{
 			name: "missing required name",
 			params: v1beta1.ReplicationParameters{
-				DestinationReg: v1beta1.ReplicationDestination{
+				DestinationReg: &v1beta1.ReplicationDestination{
 					Name:      "dest-reg",
 					Namespace: "namespace",
 					URL:       "https://dest harbor.example.com",
@@ -889,18 +889,205 @@ func TestObserveReplicationDoesNotSetAvailableWhenNotUpToDate(t *testing.T) {
 	}
 }
 
+// TestObserveMapsLastExecutionFromNewestExecution verifies Observe picks the
+// newest execution (by start time) out of several and maps every field onto
+// atProvider.lastExecution.
+func TestObserveMapsLastExecutionFromNewestExecution(t *testing.T) {
+	ctx := context.Background()
+	cr := &v1beta1.Replication{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-replication"},
+		Spec: v1beta1.ReplicationSpec{
+			ForProvider: v1beta1.ReplicationParameters{Name: "my-replication"},
+		},
+	}
+
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now().Add(-1 * time.Hour)
+	ext := &external{
+		service: &mockReplicationClient{
+			listReplicationPoliciesFunc: func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
+				return []*harborclients.ReplicationPolicyStatus{{ID: "policy-123", Name: "my-replication"}}, nil
+			},
+			listReplicationExecutionsFunc: func(ctx context.Context, policyID string) ([]*harborclients.ReplicationExecution, error) {
+				return []*harborclients.ReplicationExecution{
+					{ID: "1", Status: "Succeed", StatusText: "old", StartTime: older, EndTime: older, SuccessCount: 1},
+					{ID: "2", Status: "Failed", StatusText: "boom", StartTime: newer, EndTime: newer, SuccessCount: 0, FailedCount: 1},
+				}, nil
+			},
+		},
+	}
+
+	if _, err := ext.Observe(ctx, cr); err != nil {
+		t.Fatalf("Observe should not fail, got %v", err)
+	}
+
+	got := cr.Status.AtProvider.LastExecution
+	if got == nil {
+		t.Fatal("expected lastExecution to be set")
+	}
+	if got.Status != "Failed" || got.StatusText != "boom" || got.Failed != 1 {
+		t.Errorf("expected the newer (Failed/boom) execution, got %+v", got)
+	}
+}
+
+// TestObserveNoExecutionsLeavesLastExecutionNil verifies a policy with no
+// execution history reports lastExecution as nil, not a zero-valued struct.
+func TestObserveNoExecutionsLeavesLastExecutionNil(t *testing.T) {
+	ctx := context.Background()
+	cr := &v1beta1.Replication{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-replication"},
+		Spec: v1beta1.ReplicationSpec{
+			ForProvider: v1beta1.ReplicationParameters{Name: "my-replication"},
+		},
+	}
+
+	ext := &external{
+		service: &mockReplicationClient{
+			listReplicationPoliciesFunc: func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
+				return []*harborclients.ReplicationPolicyStatus{{ID: "policy-123", Name: "my-replication"}}, nil
+			},
+			listReplicationExecutionsFunc: func(ctx context.Context, policyID string) ([]*harborclients.ReplicationExecution, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	if _, err := ext.Observe(ctx, cr); err != nil {
+		t.Fatalf("Observe should not fail, got %v", err)
+	}
+	if cr.Status.AtProvider.LastExecution != nil {
+		t.Errorf("expected lastExecution nil with no executions, got %+v", cr.Status.AtProvider.LastExecution)
+	}
+}
+
+// TestObserveDriftInSourceRegistryNotUpToDate verifies Observe compares the
+// resolved source registry name, not just description/enabled as before.
+func TestObserveDriftInSourceRegistryNotUpToDate(t *testing.T) {
+	ctx := context.Background()
+	cr := &v1beta1.Replication{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-replication"},
+		Spec: v1beta1.ReplicationSpec{
+			ForProvider: v1beta1.ReplicationParameters{
+				Name:           "my-replication",
+				SourceRegistry: ptrString("docker-hub"),
+				Trigger:        "manual",
+			},
+		},
+	}
+
+	ext := &external{
+		service: &mockReplicationClient{
+			listReplicationPoliciesFunc: func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
+				return []*harborclients.ReplicationPolicyStatus{
+					{ID: "policy-123", Name: "my-replication", SourceRegistryName: "quay-mirror", Trigger: "manual"},
+				}, nil
+			},
+		},
+	}
+
+	obs, err := ext.Observe(ctx, cr)
+	if err != nil {
+		t.Fatalf("Observe should not fail, got %v", err)
+	}
+	if obs.ResourceUpToDate {
+		t.Error("ResourceUpToDate should be false when source registry differs")
+	}
+}
+
+// TestObserveDriftInFiltersNotUpToDate verifies a filter-only change (same
+// description/enabled) is caught, using the repository->name mapping.
+func TestObserveDriftInFiltersNotUpToDate(t *testing.T) {
+	ctx := context.Background()
+	cr := &v1beta1.Replication{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-replication"},
+		Spec: v1beta1.ReplicationSpec{
+			ForProvider: v1beta1.ReplicationParameters{
+				Name:    "my-replication",
+				Trigger: "manual",
+				Filters: []v1beta1.ReplicationFilter{{Type: "repository", Value: "**"}},
+			},
+		},
+	}
+
+	ext := &external{
+		service: &mockReplicationClient{
+			listReplicationPoliciesFunc: func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
+				return []*harborclients.ReplicationPolicyStatus{
+					{
+						ID:      "policy-123",
+						Name:    "my-replication",
+						Trigger: "manual",
+						Filters: []harborclients.ReplicationPolicyFilter{{Type: "name", Value: "library/**"}},
+					},
+				}, nil
+			},
+		},
+	}
+
+	obs, err := ext.Observe(ctx, cr)
+	if err != nil {
+		t.Fatalf("Observe should not fail, got %v", err)
+	}
+	if obs.ResourceUpToDate {
+		t.Error("ResourceUpToDate should be false when filter value differs")
+	}
+}
+
+// TestObserveDriftInCronNotUpToDate verifies a scheduled trigger's cron is
+// compared, not just the trigger type (G4 — cron was previously lost entirely).
+func TestObserveDriftInCronNotUpToDate(t *testing.T) {
+	ctx := context.Background()
+	cron := "0 0 2 * * *"
+	cr := &v1beta1.Replication{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-replication"},
+		Spec: v1beta1.ReplicationSpec{
+			ForProvider: v1beta1.ReplicationParameters{
+				Name:    "my-replication",
+				Trigger: "scheduled",
+				Cron:    &cron,
+			},
+		},
+	}
+
+	ext := &external{
+		service: &mockReplicationClient{
+			listReplicationPoliciesFunc: func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
+				return []*harborclients.ReplicationPolicyStatus{
+					{ID: "policy-123", Name: "my-replication", Trigger: "scheduled", Cron: "0 0 3 * * *"},
+				}, nil
+			},
+		},
+	}
+
+	obs, err := ext.Observe(ctx, cr)
+	if err != nil {
+		t.Fatalf("Observe should not fail, got %v", err)
+	}
+	if obs.ResourceUpToDate {
+		t.Error("ResourceUpToDate should be false when cron differs")
+	}
+}
+
 type mockReplicationClient struct {
 	harborclients.HarborClienter
-	listReplicationPoliciesFunc func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error)
-	createReplicationPolicyFunc func(ctx context.Context, spec *harborclients.ReplicationPolicySpec) (*harborclients.ReplicationPolicyStatus, error)
-	updateReplicationPolicyFunc func(ctx context.Context, policyID string, spec *harborclients.ReplicationPolicySpec) (*harborclients.ReplicationPolicyStatus, error)
-	deleteReplicationPolicyFunc func(ctx context.Context, policyID string) error
-	closeFunc                   func() error
+	listReplicationPoliciesFunc   func(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error)
+	createReplicationPolicyFunc   func(ctx context.Context, spec *harborclients.ReplicationPolicySpec) (*harborclients.ReplicationPolicyStatus, error)
+	updateReplicationPolicyFunc   func(ctx context.Context, policyID string, spec *harborclients.ReplicationPolicySpec) (*harborclients.ReplicationPolicyStatus, error)
+	deleteReplicationPolicyFunc   func(ctx context.Context, policyID string) error
+	listReplicationExecutionsFunc func(ctx context.Context, policyID string) ([]*harborclients.ReplicationExecution, error)
+	closeFunc                     func() error
 }
 
 func (m *mockReplicationClient) ListReplicationPolicies(ctx context.Context) ([]*harborclients.ReplicationPolicyStatus, error) {
 	if m.listReplicationPoliciesFunc != nil {
 		return m.listReplicationPoliciesFunc(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockReplicationClient) ListReplicationExecutions(ctx context.Context, policyID string) ([]*harborclients.ReplicationExecution, error) {
+	if m.listReplicationExecutionsFunc != nil {
+		return m.listReplicationExecutionsFunc(ctx, policyID)
 	}
 	return nil, nil
 }
