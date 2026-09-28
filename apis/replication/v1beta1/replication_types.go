@@ -22,11 +22,13 @@ type ReplicationFilter struct {
 
 // ReplicationDestination defines the destination registry
 type ReplicationDestination struct {
-	// Name is the destination registry name
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
+	// Name is the destination registry name. Empty/omitted means the local
+	// Harbor (pull-mode replication); Namespace still targets the destination
+	// project.
+	// +kubebuilder:validation:Optional
+	Name string `json:"name,omitempty"`
 
-	// Namespace is the namespace in destination registry
+	// Namespace is the namespace/project in the destination registry
 	// +kubebuilder:validation:Optional
 	Namespace string `json:"namespace,omitempty"`
 
@@ -49,9 +51,11 @@ type ReplicationParameters struct {
 	// +kubebuilder:validation:Optional
 	SourceRegistry *string `json:"sourceRegistry,omitempty"`
 
-	// DestinationReg is the destination registry configuration
-	// +kubebuilder:validation:Required
-	DestinationReg ReplicationDestination `json:"destinationReg"`
+	// DestinationReg is the destination registry configuration. Omit for
+	// pull-mode replication into the local Harbor (Namespace still targets the
+	// destination project).
+	// +kubebuilder:validation:Optional
+	DestinationReg *ReplicationDestination `json:"destinationReg,omitempty"`
 
 	// Filters define which repositories/tags to replicate
 	// +kubebuilder:validation:Required
@@ -61,6 +65,12 @@ type ReplicationParameters struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=manual;scheduled;event_based
 	Trigger string `json:"trigger"`
+
+	// Cron is the cron schedule for a "scheduled" trigger, e.g. "0 0 2 * * *".
+	// Required when Trigger is "scheduled"; enforced by the client (Harbor
+	// accepts several cron dialects, not easily expressed as a CRD pattern).
+	// +kubebuilder:validation:Optional
+	Cron *string `json:"cron,omitempty"`
 
 	// DeleteSourceTag removes source image tags after replication
 	// +kubebuilder:validation:Optional
@@ -91,8 +101,31 @@ type ReplicationObservation struct {
 	// UpdateTime is when the policy was last updated
 	UpdateTime *metav1.Time `json:"updateTime,omitempty"`
 
-	// LastExecutionStatus is the status of the last execution
-	LastExecutionStatus *string `json:"lastExecutionStatus,omitempty"`
+	// LastExecution summarizes the most recent replication execution, sourced
+	// from Harbor's execution list (newest by start time). Nil until the
+	// policy has run at least once.
+	LastExecution *ReplicationExecutionStatus `json:"lastExecution,omitempty"`
+}
+
+// ReplicationExecutionStatus summarizes the outcome of a replication execution.
+type ReplicationExecutionStatus struct {
+	// Status is the execution's terminal or in-progress status (e.g. Succeed, Failed, InProgress).
+	Status string `json:"status,omitempty"`
+
+	// StatusText carries Harbor's human-readable detail for the status (e.g. a failure reason).
+	StatusText string `json:"statusText,omitempty"`
+
+	// Start is when the execution started.
+	Start *metav1.Time `json:"start,omitempty"`
+
+	// End is when the execution finished.
+	End *metav1.Time `json:"end,omitempty"`
+
+	// Succeed is the count of successfully replicated tasks.
+	Succeed int64 `json:"succeed,omitempty"`
+
+	// Failed is the count of failed tasks.
+	Failed int64 `json:"failed,omitempty"`
 }
 
 // A ReplicationSpec defines the desired state of a Replication policy.

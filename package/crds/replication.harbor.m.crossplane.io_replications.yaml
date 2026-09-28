@@ -68,6 +68,12 @@ spec:
                 description: ReplicationParameters defines the desired state of a
                   Replication policy
                 properties:
+                  cron:
+                    description: |-
+                      Cron is the cron schedule for a "scheduled" trigger, e.g. "0 0 2 * * *".
+                      Required when Trigger is "scheduled"; enforced by the client (Harbor
+                      accepts several cron dialects, not easily expressed as a CRD pattern).
+                    type: string
                   deleteSourceTag:
                     description: DeleteSourceTag removes source image tags after replication
                     type: boolean
@@ -75,19 +81,24 @@ spec:
                     description: Description of the replication policy
                     type: string
                   destinationReg:
-                    description: DestinationReg is the destination registry configuration
+                    description: |-
+                      DestinationReg is the destination registry configuration. Omit for
+                      pull-mode replication into the local Harbor (Namespace still targets the
+                      destination project).
                     properties:
                       name:
-                        description: Name is the destination registry name
+                        description: |-
+                          Name is the destination registry name. Empty/omitted means the local
+                          Harbor (pull-mode replication); Namespace still targets the destination
+                          project.
                         type: string
                       namespace:
-                        description: Namespace is the namespace in destination registry
+                        description: Namespace is the namespace/project in the destination
+                          registry
                         type: string
                       url:
                         description: URL is the destination registry URL
                         type: string
-                    required:
-                    - name
                     type: object
                   enabled:
                     default: true
@@ -135,7 +146,6 @@ spec:
                     - event_based
                     type: string
                 required:
-                - destinationReg
                 - filters
                 - name
                 - trigger
@@ -216,9 +226,38 @@ spec:
                   id:
                     description: ID is the unique identifier of the replication policy
                     type: string
-                  lastExecutionStatus:
-                    description: LastExecutionStatus is the status of the last execution
-                    type: string
+                  lastExecution:
+                    description: |-
+                      LastExecution summarizes the most recent replication execution, sourced
+                      from Harbor's execution list (newest by start time). Nil until the
+                      policy has run at least once.
+                    properties:
+                      end:
+                        description: End is when the execution finished.
+                        format: date-time
+                        type: string
+                      failed:
+                        description: Failed is the count of failed tasks.
+                        format: int64
+                        type: integer
+                      start:
+                        description: Start is when the execution started.
+                        format: date-time
+                        type: string
+                      status:
+                        description: Status is the execution's terminal or in-progress
+                          status (e.g. Succeed, Failed, InProgress).
+                        type: string
+                      statusText:
+                        description: StatusText carries Harbor's human-readable detail
+                          for the status (e.g. a failure reason).
+                        type: string
+                      succeed:
+                        description: Succeed is the count of successfully replicated
+                          tasks.
+                        format: int64
+                        type: integer
+                    type: object
                   updateTime:
                     description: UpdateTime is when the policy was last updated
                     format: date-time

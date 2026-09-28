@@ -112,13 +112,13 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			ut := metav1.NewTime(policy.UpdateTime)
 			cr.Status.AtProvider.UpdateTime = &ut
 
-			upToDate := true
-			if cr.Spec.ForProvider.Description != nil && policy.Description != nil && *cr.Spec.ForProvider.Description != *policy.Description {
-				upToDate = false
+			execs, err := c.service.ListReplicationExecutions(ctx, policy.ID)
+			if err != nil {
+				return managed.ExternalObservation{}, err
 			}
-			if cr.Spec.ForProvider.Enabled != nil && *cr.Spec.ForProvider.Enabled != policy.Enabled {
-				upToDate = false
-			}
+			cr.Status.AtProvider.LastExecution = lastExecutionStatus(harborclients.LatestReplicationExecution(execs))
+
+			upToDate := replicationUpToDate(cr, policy)
 
 			cr.SetConditions(xpv1.Available())
 
@@ -127,6 +127,88 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 
 	return managed.ExternalObservation{ResourceExists: false}, nil
+}
+
+// lastExecutionStatus converts the newest replication execution into the CR's
+// status shape. Returns nil (not an empty struct) when the policy has never run,
+// so atProvider.lastExecution stays absent rather than a zero-valued object.
+func lastExecutionStatus(e *harborclients.ReplicationExecution) *v1beta1.ReplicationExecutionStatus {
+	if e == nil {
+		return nil
+	}
+	out := &v1beta1.ReplicationExecutionStatus{
+		Status:     e.Status,
+		StatusText: e.StatusText,
+		Succeed:    e.SuccessCount,
+		Failed:     e.FailedCount,
+	}
+	if !e.StartTime.IsZero() {
+		t := metav1.NewTime(e.StartTime)
+		out.Start = &t
+	}
+	if !e.EndTime.IsZero() {
+		t := metav1.NewTime(e.EndTime)
+		out.End = &t
+	}
+	return out
+}
+
+// replicationUpToDate compares the CR's desired state against the observed
+// Harbor policy across every field Update can change: source/destination
+// registry, destination namespace, filters, trigger type + cron, description
+// and enabled. Description/enabled were the only fields compared before this;
+// a drift in any of the others previously went unnoticed forever.
+func replicationUpToDate(cr *v1beta1.Replication, policy *harborclients.ReplicationPolicyStatus) bool {
+	p := &cr.Spec.ForProvider
+
+	if p.Description != nil && policy.Description != nil && *p.Description != *policy.Description {
+		return false
+	}
+	if p.Enabled != nil && *p.Enabled != policy.Enabled {
+		return false
+	}
+
+	wantSrc := ""
+	if p.SourceRegistry != nil {
+		wantSrc = *p.SourceRegistry
+	}
+	if wantSrc != policy.SourceRegistryName {
+		return false
+	}
+
+	wantDestName, wantDestNS := "", ""
+	if p.DestinationReg != nil {
+		wantDestName = p.DestinationReg.Name
+		wantDestNS = p.DestinationReg.Namespace
+	}
+	if wantDestName != policy.DestRegistryName || wantDestNS != policy.DestNamespace {
+		return false
+	}
+
+	if p.Trigger != "" && p.Trigger != policy.Trigger {
+		return false
+	}
+	wantCron := ""
+	if p.Trigger == "scheduled" && p.Cron != nil {
+		wantCron = *p.Cron
+	}
+	if wantCron != policy.Cron {
+		return false
+	}
+
+	return filtersUpToDate(p.Filters, policy.Filters)
+}
+
+func filtersUpToDate(want []v1beta1.ReplicationFilter, got []harborclients.ReplicationPolicyFilter) bool {
+	if len(want) != len(got) {
+		return false
+	}
+	for i, w := range want {
+		if harborclients.ReplicationFilterType(w.Type) != got[i].Type || w.Value != got[i].Value {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
@@ -154,6 +236,7 @@ func replicationSpecFromCR(cr *v1beta1.Replication) *harborclients.ReplicationPo
 		Description:     cr.Spec.ForProvider.Description,
 		SourceRegistry:  cr.Spec.ForProvider.SourceRegistry,
 		Trigger:         cr.Spec.ForProvider.Trigger,
+		Cron:            cr.Spec.ForProvider.Cron,
 		DeleteSourceTag: cr.Spec.ForProvider.DeleteSourceTag,
 		Override:        cr.Spec.ForProvider.Override,
 		Enabled:         cr.Spec.ForProvider.Enabled,
@@ -164,10 +247,12 @@ func replicationSpecFromCR(cr *v1beta1.Replication) *harborclients.ReplicationPo
 			spec.Filters[i] = harborclients.ReplicationPolicyFilter{Type: f.Type, Value: f.Value}
 		}
 	}
-	spec.DestinationReg = &harborclients.ReplicationPolicyDestination{
-		Name:      cr.Spec.ForProvider.DestinationReg.Name,
-		Namespace: cr.Spec.ForProvider.DestinationReg.Namespace,
-		URL:       cr.Spec.ForProvider.DestinationReg.URL,
+	if d := cr.Spec.ForProvider.DestinationReg; d != nil {
+		spec.DestinationReg = &harborclients.ReplicationPolicyDestination{
+			Name:      d.Name,
+			Namespace: d.Namespace,
+			URL:       d.URL,
+		}
 	}
 	return spec
 }

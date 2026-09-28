@@ -13,12 +13,15 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"k8s.io/utils/ptr"
 )
 
 // fakeReplicationServer serves a stateful in-memory Harbor replication policy API.
@@ -244,3 +247,179 @@ func TestReplicationPolicyClient_RealCRUD(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// fakePullReplicationServer serves a two-registry Harbor fake (source +
+// destination, name-filtered lookup) and captures the raw create-policy
+// request body it receives, so tests can assert on the exact JSON shape sent
+// to Harbor (src_registry/dest_registry/trigger_settings.cron).
+func fakePullReplicationServer(t *testing.T, lastBody *map[string]interface{}) *httptest.Server {
+	t.Helper()
+	registries := map[string]int64{
+		"docker-hub":       5,
+		"my-dest-registry": 7,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2.0/registries", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		name := r.URL.Query().Get("name")
+		if id, ok := registries[name]; ok {
+			_, _ = fmt.Fprintf(w, `[{"id":%d,"name":%q}]`, id, name)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/api/v2.0/replication/policies", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		*lastBody = raw
+		w.Header().Set("Location", "/api/v2.0/replication/policies/42")
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/api/v2.0/replication/policies/42", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 42, "name": "pull-policy"})
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestCreateReplicationPolicy_PullMode_SendsSourceRegistryNoDestRegistry proves
+// pull-mode's core request shape: the source registry resolves to its numeric
+// id, a local (name-less) destination sends no dest_registry at all, and
+// dest_namespace still carries the destination project.
+func TestCreateReplicationPolicy_PullMode_SendsSourceRegistryNoDestRegistry(t *testing.T) {
+	var body map[string]interface{}
+	srv := fakePullReplicationServer(t, &body)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	spec := &ReplicationPolicySpec{
+		Name:           "pull-policy",
+		SourceRegistry: ptr.To("docker-hub"),
+		Trigger:        "manual",
+		Enabled:        boolPtr(true),
+		DestinationReg: &ReplicationPolicyDestination{Namespace: "my-project"},
+	}
+
+	if _, err := c.CreateReplicationPolicy(ctx, spec); err != nil {
+		t.Fatalf("CreateReplicationPolicy: %v", err)
+	}
+
+	src, ok := body["src_registry"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected src_registry in request body, got %v", body)
+	}
+	if id, _ := src["id"].(float64); int64(id) != 5 {
+		t.Errorf("expected src_registry.id 5, got %v", src["id"])
+	}
+	if _, ok := body["dest_registry"]; ok {
+		t.Errorf("expected no dest_registry for a local-Harbor destination, got %v", body["dest_registry"])
+	}
+	if ns, _ := body["dest_namespace"].(string); ns != "my-project" {
+		t.Errorf("expected dest_namespace 'my-project', got %q", ns)
+	}
+}
+
+// TestCreateReplicationPolicy_NilDestinationDoesNotError proves omitting
+// destinationReg entirely (not just an empty name) is a valid local-Harbor
+// pull request, not the old hard "destination registry is required" error.
+func TestCreateReplicationPolicy_NilDestinationDoesNotError(t *testing.T) {
+	var body map[string]interface{}
+	srv := fakePullReplicationServer(t, &body)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	spec := &ReplicationPolicySpec{
+		Name:    "pull-policy-no-dest",
+		Trigger: "manual",
+		Enabled: boolPtr(true),
+	}
+
+	if _, err := c.CreateReplicationPolicy(ctx, spec); err != nil {
+		t.Fatalf("CreateReplicationPolicy with nil destination should not error, got %v", err)
+	}
+	if _, ok := body["dest_registry"]; ok {
+		t.Errorf("expected no dest_registry, got %v", body["dest_registry"])
+	}
+}
+
+// TestCreateReplicationPolicy_ScheduledTrigger_CronReachesTriggerSettings
+// proves the CR's cron field actually lands on Harbor's
+// trigger.trigger_settings.cron, not just the bare trigger type.
+func TestCreateReplicationPolicy_ScheduledTrigger_CronReachesTriggerSettings(t *testing.T) {
+	var body map[string]interface{}
+	srv := fakePullReplicationServer(t, &body)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	cron := "0 0 2 * * *"
+	spec := &ReplicationPolicySpec{
+		Name:    "scheduled-policy",
+		Trigger: "scheduled",
+		Cron:    &cron,
+		Enabled: boolPtr(true),
+	}
+
+	if _, err := c.CreateReplicationPolicy(ctx, spec); err != nil {
+		t.Fatalf("CreateReplicationPolicy: %v", err)
+	}
+
+	trigger, ok := body["trigger"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected trigger in request body, got %v", body)
+	}
+	settings, ok := trigger["trigger_settings"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected trigger_settings, got %v", trigger)
+	}
+	if settings["cron"] != cron {
+		t.Errorf("expected cron %q, got %v", cron, settings["cron"])
+	}
+}
+
+// TestCreateReplicationPolicy_ScheduledTriggerWithoutCronErrors proves the
+// client enforces cron as required when trigger is scheduled, since the CRD
+// itself can't (Harbor accepts several cron dialects).
+func TestCreateReplicationPolicy_ScheduledTriggerWithoutCronErrors(t *testing.T) {
+	var body map[string]interface{}
+	srv := fakePullReplicationServer(t, &body)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	spec := &ReplicationPolicySpec{Name: "no-cron", Trigger: "scheduled"}
+	if _, err := c.CreateReplicationPolicy(ctx, spec); err == nil {
+		t.Error("expected an error when trigger is scheduled without a cron")
+	}
+}
+
+// TestCreateReplicationPolicy_UnknownSourceRegistryErrors proves a source
+// registry name that doesn't resolve returns a clear, actionable error
+// instead of silently falling back to local (or a raw Harbor 400).
+func TestCreateReplicationPolicy_UnknownSourceRegistryErrors(t *testing.T) {
+	var body map[string]interface{}
+	srv := fakePullReplicationServer(t, &body)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	spec := &ReplicationPolicySpec{
+		Name:           "bad-source",
+		SourceRegistry: ptr.To("does-not-exist"),
+		Trigger:        "manual",
+	}
+	_, err := c.CreateReplicationPolicy(ctx, spec)
+	if err == nil {
+		t.Fatal("expected an error for an unknown source registry")
+	}
+	if !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("expected error to name the missing registry, got %v", err)
+	}
+}
