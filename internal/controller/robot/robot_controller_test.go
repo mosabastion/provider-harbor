@@ -13,6 +13,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	harbormodels "github.com/goharbor/go-client/pkg/sdk/v2.0/models"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,6 +154,7 @@ func TestObserveRobotProjectIsNotDrift(t *testing.T) {
 					ID:           "123",
 					Name:         "my-robot",
 					ProjectID:    &observedProjectName,
+					Permissions:  observedPullPermission("pull"),
 					CreationTime: time.Now(),
 					UpdateTime:   time.Now(),
 				}, nil
@@ -344,6 +346,7 @@ func TestObserveRobotExists(t *testing.T) {
 					ID:           "123",
 					Name:         "my-robot",
 					Secret:       "secret-token",
+					Permissions:  observedPullPermission("pull"),
 					CreationTime: time.Now(),
 					UpdateTime:   time.Now(),
 				}, nil
@@ -402,6 +405,43 @@ func TestObserveRobotNotUpToDate(t *testing.T) {
 	// ResourceUpToDate=false (which drives Update), not by withholding Ready.
 	if robot.GetCondition(xpv1.TypeReady).Status != corev1.ConditionTrue {
 		t.Error("Ready should be True (Available) for an existing robot, even when drifted")
+	}
+}
+
+func observedPullPermission(order ...string) []*harbormodels.RobotPermission {
+	p := &harbormodels.RobotPermission{Kind: "project", Namespace: "tenant-acme"}
+	for _, a := range order {
+		p.Access = append(p.Access, &harbormodels.Access{Resource: "repository", Action: a})
+	}
+	return []*harbormodels.RobotPermission{p}
+}
+
+func TestObserveRobotPermissionDrift(t *testing.T) {
+	tests := map[string]struct {
+		specAccess   []string
+		observed     []*harbormodels.RobotPermission
+		wantUpToDate bool
+	}{
+		"permissions-only change is drift":   {[]string{"pull", "push"}, observedPullPermission("pull"), false},
+		"order-only difference is not drift": {[]string{"push", "pull"}, observedPullPermission("pull", "push"), true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			cr := robotWithExternalID("123")
+			cr.Spec.ForProvider.Permissions = []v1beta1.RobotPermission{{Namespace: "repository", Access: tc.specAccess}}
+			ext := &external{service: &mockRobotClient{
+				getRobotFunc: func(ctx context.Context, id string) (*harborclients.RobotStatus, error) {
+					return &harborclients.RobotStatus{ID: "123", Level: "project", Permissions: tc.observed}, nil
+				},
+			}}
+			obs, err := ext.Observe(context.Background(), cr)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if obs.ResourceUpToDate != tc.wantUpToDate {
+				t.Errorf("ResourceUpToDate = %v, want %v", obs.ResourceUpToDate, tc.wantUpToDate)
+			}
+		})
 	}
 }
 

@@ -22,8 +22,8 @@ import (
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	apiv1beta1 "github.com/rossigee/provider-harbor/apis/v1beta1"
 	"github.com/rossigee/provider-harbor/apis/robot/v1beta1"
+	apiv1beta1 "github.com/rossigee/provider-harbor/apis/v1beta1"
 	harborclients "github.com/rossigee/provider-harbor/internal/clients"
 	controllerpkg "github.com/rossigee/provider-harbor/internal/controller"
 )
@@ -158,8 +158,9 @@ func robotObservation(cr *v1beta1.Robot, robot *harborclients.RobotStatus) manag
 	descDrifted := cr.Spec.ForProvider.Description != nil && robot.Description != nil && *cr.Spec.ForProvider.Description != *robot.Description
 	// A robot's project is fixed at creation (Harbor scopes it immutably) and the
 	// observed ProjectID is the project NAME, not the numeric-id spec value, so it
-	// is not a meaningful drift signal — compare description only.
-	upToDate := !descDrifted
+	// is not a meaningful drift signal — compare description and permissions only.
+	permsDrifted := harborclients.RobotPermissionsDrifted(robotClientSpec(cr), robot)
+	upToDate := !descDrifted && !permsDrifted
 
 	// Mark Available: the resource exists and is usable. Drift is signalled via
 	// ResourceUpToDate (-> Update)/Synced, not by withholding Ready.

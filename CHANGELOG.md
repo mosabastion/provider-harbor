@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-10-01
+
+### Fixed
+
+**`Robot`: a permission change in the spec now reaches Harbor**
+Symptom: editing `spec.forProvider.permissions` of an existing robot never changed the robot in Harbor.
+- Cause: `Observe` computed `upToDate` from the description only, and `robotStatusFromModel` dropped the observed permissions, so `Update` was never called for a permissions-only change.
+- Fix: `RobotStatus` now carries `Level` and `Permissions`; new `RobotPermissionsDrifted` compares spec and Harbor as sets (order-insensitive, Harbor's `effect` ignored). Project-level robots compare `(resource, action)` only, since the spec holds a numeric project id and Harbor returns the name; system-level robots compare the full `(kind, namespace, resource, action)` tuple. `Update` already PUTs the permissions without touching the secret.
+- E32-F53's Go harbor-controller must carry the same rule.
+
 ## [0.19.0] - 2026-09-28
 
 ### Features
