@@ -377,12 +377,22 @@ func (c *HarborClient) UpdateRobot(ctx context.Context, robotID string, spec *Ro
 		permissions = projectRobotPermissions(projectName, spec.Permissions)
 	}
 
+	// Harbor rejects a PUT whose name or level differs from the stored robot, and the
+	// stored name carries the "robot$" prefix the bare spec name lacks.
+	current, err := c.GetRobot(ctx, robotID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, errors.Errorf("robot %s not found", robotID)
+	}
+
 	duration := robotDuration(spec.ExpiresIn)
 	req := &harbormodels.Robot{
 		ID:          id,
-		Name:        spec.Name,
+		Name:        current.Name,
 		Description: ptr.Deref(spec.Description, ""),
-		Level:       level,
+		Level:       current.Level,
 		Duration:    &duration,
 		Permissions: permissions,
 	}

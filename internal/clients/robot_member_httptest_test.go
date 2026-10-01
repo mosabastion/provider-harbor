@@ -37,13 +37,18 @@ func fakeHarborRobots(t *testing.T) (*httptest.Server, robotInspector) {
 		namespace   string // project name carried on the permission
 		level       string
 		permKinds   []string // the kind of each created permission, in order
+		putPerms    json.RawMessage // permissions from the last accepted PUT; nil = as created
 	}
 	robots := map[int]*robot{}
 	nextID := 67
 
 	robotJSON := func(rb *robot) string {
-		return fmt.Sprintf(`{"id":%d,"name":%q,"description":%q,"creation_time":"2026-01-01T00:00:00Z","update_time":"2026-01-01T00:00:00Z","permissions":[{"kind":"project","namespace":%q,"access":[{"resource":"repository","action":"pull"}]}]}`,
-			rb.id, rb.name, rb.description, rb.namespace)
+		perms := `[{"kind":"project","namespace":"` + rb.namespace + `","access":[{"resource":"repository","action":"pull"}]}]`
+		if rb.putPerms != nil {
+			perms = string(rb.putPerms)
+		}
+		return fmt.Sprintf(`{"id":%d,"name":%q,"description":%q,"level":%q,"creation_time":"2026-01-01T00:00:00Z","update_time":"2026-01-01T00:00:00Z","permissions":%s}`,
+			rb.id, rb.name, rb.description, rb.level, perms)
 	}
 
 	mux := http.NewServeMux()
@@ -71,7 +76,11 @@ func fakeHarborRobots(t *testing.T) (*httptest.Server, robotInspector) {
 			for _, p := range body.Permissions {
 				kinds = append(kinds, p.Kind)
 			}
+			// Real Harbor: system robots are "robot$<name>", project robots "robot$<project>+<name>".
 			full := fmt.Sprintf("robot$%s+%s", ns, body.Name)
+			if body.Level == "system" {
+				full = "robot$" + body.Name
+			}
 			robots[nextID] = &robot{id: nextID, name: full, description: body.Description, namespace: ns, level: body.Level, permKinds: kinds}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
@@ -125,10 +134,21 @@ func fakeHarborRobots(t *testing.T) (*httptest.Server, robotInspector) {
 				return
 			}
 			var body struct {
-				Description string `json:"description"`
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Level       string          `json:"level"`
+				Permissions json.RawMessage `json:"permissions"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			// Mirrors Harbor v2.15 UpdateRobot: name and level must match the stored robot.
+			if body.Name != rb.name || body.Level != rb.level {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"errors":[{"code":"BAD_REQUEST","message":"cannot update the level or name of robot"}]}`))
+				return
+			}
 			rb.description = body.Description
+			rb.putPerms = body.Permissions
 			w.WriteHeader(http.StatusOK)
 		case http.MethodDelete:
 			if !ok {
@@ -281,6 +301,38 @@ func TestRobotClient_SystemLevel(t *testing.T) {
 	// Get by id works the same way for a system robot.
 	if got, err := c.GetRobot(ctx, st.ID); err != nil || got == nil {
 		t.Fatalf("GetRobot system: st=%v err=%v", got, err)
+	}
+}
+
+// UpdateRobot must send the stored (prefixed) name and level, not the bare spec name,
+// or Harbor answers 400 "cannot update the level or name of robot".
+func TestRobotClient_UpdateSendsStoredNameAndLevel(t *testing.T) {
+	srv, _ := fakeHarborRobots(t)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	cases := map[string]*RobotSpec{
+		"system": {Name: "platform-api", Level: "system", Permissions: []RobotPermission{
+			{Kind: ptr.To("system"), Namespace: "robot", Access: []string{"create"}}}},
+		"project": {Name: "ci", Level: "project", ProjectID: ptr.To("16"), Permissions: []RobotPermission{
+			{Namespace: "repository", Access: []string{"pull"}}}},
+	}
+	for name, spec := range cases {
+		t.Run(name, func(t *testing.T) {
+			st, err := c.CreateRobot(ctx, spec)
+			if err != nil {
+				t.Fatalf("CreateRobot: %v", err)
+			}
+			spec.Permissions = []RobotPermission{{Kind: spec.Permissions[0].Kind, Namespace: "repository", Access: []string{"pull", "push"}}}
+			got, err := c.UpdateRobot(ctx, st.ID, spec)
+			if err != nil {
+				t.Fatalf("UpdateRobot: %v", err)
+			}
+			if len(got.Permissions) != 1 || len(got.Permissions[0].Access) != 2 {
+				t.Errorf("new permissions not sent: %+v", got.Permissions)
+			}
+		})
 	}
 }
 

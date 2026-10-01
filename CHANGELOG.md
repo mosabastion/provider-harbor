@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-10-01
+
+### Fixed
+
+**`Robot`: `Update` is no longer rejected by Harbor with `cannot update the level or name of robot`**
+Symptom: with v0.19.1 a permission change reached `Update`, and Harbor answered `BAD_REQUEST: cannot update the level or name of robot`.
+- Cause: the PUT body carried the bare `spec.name`; Harbor compares it to the stored full name (`robot$<name>`, `robot$<project>+<name>`).
+- Fix: `UpdateRobot` first GETs the robot and sends its stored name and level; description, duration and permissions still come from the spec. The secret is untouched.
+- v0.19.1 made `Update` reachable for permission drift, which exposed this.
+
 ## [0.19.1] - 2026-10-01
 
 ### Fixed
