@@ -36,7 +36,7 @@ func fakeHarborRobots(t *testing.T) (*httptest.Server, robotInspector) {
 		description string
 		namespace   string // project name carried on the permission
 		level       string
-		permKinds   []string // the kind of each created permission, in order
+		permKinds   []string        // the kind of each created permission, in order
 		putPerms    json.RawMessage // permissions from the last accepted PUT; nil = as created
 	}
 	robots := map[int]*robot{}
