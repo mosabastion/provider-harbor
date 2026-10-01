@@ -63,6 +63,8 @@ type RobotStatus struct {
 	Name         string
 	Description  *string
 	ProjectID    *string
+	Level        string
+	Permissions  []*harbormodels.RobotPermission
 	Secret       string
 	ExpiresAt    *time.Time
 	CreationTime time.Time
@@ -146,11 +148,58 @@ func systemRobotPermissions(perms []RobotPermission) []*harbormodels.RobotPermis
 	return out
 }
 
+type permissionKey struct{ kind, namespace, resource, action string }
+
+// permissionSet flattens permissions to (kind, namespace, resource, action)
+// tuples. Project-level robots drop kind and namespace: the spec holds a numeric
+// project id while Harbor returns the project name. Harbor's effect is ignored.
+func permissionSet(perms []*harbormodels.RobotPermission, projectLevel bool) map[permissionKey]bool {
+	set := map[permissionKey]bool{}
+	for _, p := range perms {
+		if p == nil {
+			continue
+		}
+		for _, a := range p.Access {
+			k := permissionKey{kind: p.Kind, namespace: p.Namespace, resource: a.Resource, action: a.Action}
+			if projectLevel {
+				k = permissionKey{resource: a.Resource, action: a.Action}
+			}
+			set[k] = true
+		}
+	}
+	return set
+}
+
+// RobotPermissionsDrifted reports whether the spec's permissions differ from what
+// Harbor has, as sets (order is irrelevant).
+func RobotPermissionsDrifted(spec *RobotSpec, observed *RobotStatus) bool {
+	projectLevel := spec.Level != robotLevelSystem
+	var desired []*harbormodels.RobotPermission
+	if projectLevel {
+		desired = projectRobotPermissions("", spec.Permissions)
+	} else {
+		desired = systemRobotPermissions(spec.Permissions)
+	}
+	want := permissionSet(desired, projectLevel)
+	have := permissionSet(observed.Permissions, projectLevel)
+	if len(want) != len(have) {
+		return true
+	}
+	for k := range want {
+		if !have[k] {
+			return true
+		}
+	}
+	return false
+}
+
 func robotStatusFromModel(r *harbormodels.Robot) *RobotStatus {
 	st := &RobotStatus{
 		ID:           strconv.FormatInt(r.ID, 10),
 		Name:         r.Name,
 		Secret:       r.Secret,
+		Level:        r.Level,
+		Permissions:  r.Permissions,
 		CreationTime: time.Time(r.CreationTime),
 		UpdateTime:   time.Time(r.UpdateTime),
 	}
