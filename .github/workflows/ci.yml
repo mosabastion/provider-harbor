@@ -210,8 +210,8 @@ jobs:
   e2e:
     # The costliest job, so it runs only once every cheap check is green.
     needs: [changes, lint, check-diff, unit-tests, security-scan]
-    # PRs gate merges, so a push to main re-proves nothing; drafts wait for ready_for_review.
-    if: needs.changes.outputs.e2e == 'true' && github.event_name != 'push' && !github.event.pull_request.draft
+    # Too costly per PR: runs after merge, or manually via workflow_dispatch.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.e2e == 'true')
     permissions:
       contents: read
       packages: write
