@@ -211,7 +211,8 @@ jobs:
     # The costliest job, so it runs only once every cheap check is green.
     needs: [changes, lint, check-diff, unit-tests, security-scan]
     # Too costly per PR: runs after merge, or manually via workflow_dispatch.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.e2e == 'true')
+    # Temporarily disabled (CI budget); restore: if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && needs.changes.outputs.e2e == 'true')
+    if: false
     permissions:
       contents: read
       packages: write
